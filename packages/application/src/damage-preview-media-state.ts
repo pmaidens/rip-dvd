@@ -35,6 +35,7 @@ export function previewMediaTargets(record: DamagePreviewRecord) {
 export function damagePreviewMediaState(record: DamagePreviewRecord, targets = previewMediaTargets(record)) {
   const removal = record.mediaRemoval ?? null;
   const removalCondition = removal === null ? null : {
+    cancelled: null,
     pending: { state: "removing", reasonCode: "DAMAGE_PREVIEW_MEDIA_REMOVING" },
     complete: { state: "removed", reasonCode: removal.cause === "explicit_deletion" ? "DAMAGE_PREVIEW_MEDIA_DELETED" : "DAMAGE_PREVIEW_MEDIA_EXPIRED" },
     failed: { state: "removal_failed", reasonCode: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" },
@@ -73,7 +74,7 @@ export function damagePreviewRetention(access: ConsistentReadAccess, record: Dam
 export function presentDamagePreviewMedia(record: DamagePreviewRecord, retention: ReturnType<typeof damagePreviewRetention> | null, targets?: ReturnType<typeof previewMediaTargets>) {
   const { files, ...media } = damagePreviewMediaState(record, targets);
   const deletionReasons = previewGenerationActive(record) ? [{ code: "DAMAGE_PREVIEW_GENERATION_ACTIVE", message: "Cancel the preview and wait for generation to settle before removing media." }]
-    : media.state === "removing" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVING", message: "Media removal is pending. Replay its invocation to resume it." }]
+    : media.state === "removing" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVING", message: "Media removal is pending in the writable Encode worker. Inspect this request for completion or failure." }]
     : media.state === "removed" ? [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVED", message: "Media was already removed. The request history is retained." }]
     : media.state === "unsafe" || media.state === "unavailable" ? [{ code: media.state === "unsafe" ? "DAMAGE_PREVIEW_MEDIA_UNSAFE" : "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", message: "The preview file cannot be safely inspected. Its absence is not proven." }]
     : record.artifacts.length === 0 && record.commands.length === 0 ? [{ code: "DAMAGE_PREVIEW_MEDIA_NOT_GENERATED", message: "This request has no generated media." }] : [];

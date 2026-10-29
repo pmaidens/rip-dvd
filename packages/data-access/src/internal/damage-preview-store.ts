@@ -120,9 +120,9 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     },
     update,
     touchMedia(id) {
-      return sqlite.prepare("UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND json_extract(record, '$.mediaRemoval') IS NULL RETURNING id").get(now().toISOString(), id) !== undefined;
+      return sqlite.prepare("UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND (json_extract(record, '$.mediaRemoval') IS NULL OR json_extract(record, '$.mediaRemoval.state') = 'cancelled') RETURNING id").get(now().toISOString(), id) !== undefined;
     },
-    removeMedia<T>(input: Parameters<DamagePreviewAccess["removeMedia"]>[0], prepare: Parameters<DamagePreviewAccess["removeMedia"]>[1], remove: Parameters<DamagePreviewAccess["removeMedia"]>[2], present: (record: DamagePreviewRecord) => T): T {
+    requestMediaRemoval<T>(input: Parameters<DamagePreviewAccess["requestMediaRemoval"]>[0], prepare: Parameters<DamagePreviewAccess["requestMediaRemoval"]>[1], present: (record: DamagePreviewRecord) => T): T {
       const operation = `damage-preview-${input.cause}`;
       const semantic = JSON.stringify({ id: input.id, mediaToken: input.mediaToken });
       type Receipt = { record: DamagePreviewRecord; result?: T };
@@ -154,31 +154,17 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
           prepared.assertCurrent(record);
           record.mediaLastAccessedAt ??= record.updatedAt;
           if (record.mediaRemoval) record.mediaRemovalHistory = [...record.mediaRemovalHistory ?? [], record.mediaRemoval];
-          record.mediaRemoval = { mutationKey: input.mutationKey, mediaToken: input.mediaToken, cause: input.cause, state: "pending", startedAt: now().toISOString(), completedAt: null, expectedFiles: prepared.expectedFiles, outcomes: [] };
+          record.mediaRemoval = { requestId: randomUUID(), mutationKey: input.mutationKey, mediaToken: input.mediaToken, cause: input.cause, state: "pending", startedAt: now().toISOString(), completedAt: null, expectedFiles: prepared.expectedFiles, outcomes: [] };
           update(record);
           const receipt: Receipt = { record };
           sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(input.mutationKey, operation, semantic, JSON.stringify(receipt), now().getTime());
           return receipt;
         });
       };
-      let pending = admit();
+      const pending = admit();
       if (Object.hasOwn(pending, "result")) return pending.result!;
-      // The durable intent fences exports before filesystem mutation. Replays
-      // resume only pending removal; settled metadata survives response loss.
-      if (pending.record.mediaRemoval!.state === "pending") {
-        const outcomes = remove(pending.record);
-        pending = transaction(() => {
-          const previous = previousReceipt()!;
-          if (previous.record.mediaRemoval!.state !== "pending") return previous;
-          const record = find(input.id)!;
-          record.mediaRemoval = { ...previous.record.mediaRemoval!, state: outcomes.some((item) => item.outcome === "failed") ? "failed" : "complete", completedAt: now().toISOString(), outcomes };
-          update(record);
-          const settled: Receipt = { record };
-          sqlite.prepare("UPDATE mutation_invocations SET outcome = ? WHERE key = ?").run(JSON.stringify(settled), input.mutationKey);
-          return settled;
-        });
-      }
-      if (Object.hasOwn(pending, "result")) return pending.result!;
+      // The first response records acceptance, not filesystem completion.
+      // Worker settlement never rewrites this mutation's replay result.
       let result: T;
       try { result = present(pending.record); }
       catch (error) {
@@ -191,6 +177,20 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
         if (Object.hasOwn(previous, "result")) return previous.result!;
         sqlite.prepare("UPDATE mutation_invocations SET outcome = ? WHERE key = ?").run(JSON.stringify({ ...previous, result }), input.mutationKey);
         return result;
+      });
+    },
+    completeMediaRemoval(id, requestId, remove) {
+      const observed = find(id);
+      if (!observed || observed.mediaRemoval?.requestId !== requestId || observed.mediaRemoval.state !== "pending") return observed;
+      // Only the writable worker supplies this callback. A crash leaves the
+      // admitted request pending so another worker can resume the same intent.
+      const outcomes = remove(observed);
+      return transaction(() => {
+        const current = find(id);
+        if (!current || current.mediaRemoval?.requestId !== requestId || current.mediaRemoval.state !== "pending") return current;
+        current.mediaRemoval = { ...current.mediaRemoval, state: outcomes.some((item) => item.outcome === "retained") ? "cancelled" : outcomes.some((item) => item.outcome === "failed") ? "failed" : "complete", completedAt: now().toISOString(), outcomes };
+        update(current);
+        return current;
       });
     },
   };

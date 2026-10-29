@@ -888,3 +888,9 @@ identities, versioned profile, resolved execution settings, and source decision
 evidence. A retry appends a new record. Withdrawal and later catalog edits leave
 prior records intact. Historical claims have no invented source evidence.
 New-format admission remains closed until the complete core release gate passes.
+
+Damage Preview `delete` and `cleanup` admit a durable request and return pending
+media removal with `media.removal.requestId`. The writable Encode worker removes
+only the admitted preview media. Use `damage-preview inspect <request-id>` for
+completion or failure. Replaying a mutation key returns its original acceptance;
+it does not report later worker completion or perform an unlink in the CLI.

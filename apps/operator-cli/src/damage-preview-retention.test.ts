@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanupDamagePreviewMedia, createApplicationOperations } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
-import { seedRetainedDamagePreview } from "./damage-preview.test-support.js";
+import { seedRetainedDamagePreview, settleDamagePreviewMedia } from "./damage-preview.test-support.js";
 import { advanceCommittedArchiveEvidence, withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -22,7 +22,9 @@ it("deletes media with keyed replay and stale checks while preserving request hi
   const before = await inspect();
   const args = ["damage-preview", "delete", id, "--key", "synthetic-delete", "--json", JSON.stringify({ mediaToken: before.media.token })];
   const deleted = await fixture.run(args);
-  expect(deleted).toMatchObject({ exitCode: 0, result: { media: { state: "removed", removal: { cause: "explicit_deletion", state: "complete" } } } });
+  expect(deleted).toMatchObject({ exitCode: 0, result: { media: { state: "removing", removal: { requestId: expect.any(String), cause: "explicit_deletion", state: "pending" } } } });
+  expect(existsSync(path)).toBe(true);
+  settleDamagePreviewMedia(fixture);
   expect(existsSync(path)).toBe(false);
   expect(await fixture.run(args)).toEqual(deleted);
   const after = await inspect();
@@ -42,6 +44,7 @@ it("replays the original cancellation response after separate media deletion", a
   const cancelled = await fixture.run(cancelArgs);
   expect(cancelled).toMatchObject({ exitCode: 0, result: { generationStatus: "complete", media: { state: "retained" } } });
   expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-delete-after-cancel", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0 });
+  settleDamagePreviewMedia(fixture);
   expect(await fixture.run(cancelArgs)).toEqual(cancelled);
   expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { cause: "explicit_deletion" } } });
 });
@@ -62,6 +65,7 @@ it("leaves the database writer available during cancellation and deletion filesy
   try {
     expect(await fixture.run(["damage-preview", "cancel", id, "--key", "synthetic-writer-free-cancel"])).toMatchObject({ exitCode: 0 });
     expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-writer-free-delete", "--json", JSON.stringify({ mediaToken: token })])).toMatchObject({ exitCode: 0 });
+    settleDamagePreviewMedia(fixture);
     expect(blocked).toBe(false);
   } finally { other.close(); }
 });
@@ -70,12 +74,12 @@ it("rejects changed preview metadata after filesystem preparation without removi
   const { fixture, id, path, inspect } = await setup();
   const token = (await inspect()).media.token;
   const access = fixture.openAccess();
-  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
-  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, (record) => {
+  const removeMedia = access.damagePreviews.requestMediaRemoval.bind(access.damagePreviews);
+  access.damagePreviews.requestMediaRemoval = (input, prepare, present) => removeMedia(input, (record) => {
     const staged = prepare(record);
     access.damagePreviews.touchMedia(record.id);
     return staged;
-  }, remove, present);
+  }, present);
   expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-staged-media-change", "--json", JSON.stringify({ mediaToken: token })], undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_STALE" } } });
   expect(existsSync(path)).toBe(true);
   expect((await inspect()).media.removal).toBeNull();
@@ -87,12 +91,12 @@ it("replays a concurrent deletion winner when slower preparation observes stale 
   const args = ["damage-preview", "delete", id, "--key", "synthetic-concurrent-deletion", "--json", JSON.stringify({ mediaToken: token })];
   const access = fixture.openAccess();
   const other = fixture.openAccess();
-  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
+  const removeMedia = access.damagePreviews.requestMediaRemoval.bind(access.damagePreviews);
   let winner: unknown;
-  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, (record) => {
+  access.damagePreviews.requestMediaRemoval = (input, prepare, present) => removeMedia(input, (record) => {
     winner = createApplicationOperations(other).deleteDamagePreviewMedia(id, { mediaToken: token, mutationKey: input.mutationKey });
     return prepare(record);
-  }, remove, present);
+  }, present);
   try {
     expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 0, result: winner });
     expect((await fixture.run(args)).result).toEqual(winner);
@@ -110,6 +114,7 @@ it("upgrades a historical cancellation receipt once without changing later repla
   const upgraded = await fixture.run(args);
   expect(upgraded).toMatchObject({ exitCode: 0, result: { generationStatus: "complete", media: { state: "retained" } } });
   await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-historical-delete", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })]);
+  settleDamagePreviewMedia(fixture);
   expect(await fixture.run(args)).toEqual(upgraded);
 });
 
@@ -131,7 +136,9 @@ it("protects current review media indefinitely and expires outdated media at 30 
   vi.setSystemTime(created + 30 * day);
   const args = ["damage-preview", "cleanup", id, "--key", "synthetic-idle-cleanup", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })];
   const cleaned = await fixture.run(args);
-  expect(cleaned).toMatchObject({ exitCode: 0, result: { status: "outdated", media: { state: "removed", removal: { cause: "idle_cleanup", state: "complete" } } } });
+  expect(cleaned).toMatchObject({ exitCode: 0, result: { status: "outdated", media: { state: "removing", removal: { cause: "idle_cleanup", state: "pending" } } } });
+  settleDamagePreviewMedia(fixture);
+  expect((await inspect()).media.removal?.state).toBe("complete");
   expect(existsSync(path)).toBe(false); expect(await fixture.run(args)).toEqual(cleaned);
   expect(await fixture.run(["damage-preview", "export", outdated.artifacts[0]!.identity, "--destination", join(fixture.operatorHostPath, "expired.mkv")])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_EXPIRED" } } });
 });
@@ -153,7 +160,8 @@ it("retains partial coverage and failure history after cleanup, with successful 
   expect(active.media.cleanup.available).toBe(false);
   vi.setSystemTime(created + 59 * day);
   const args = ["damage-preview", "cleanup", id, "--key", "synthetic-partial-cleanup", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })];
-  expect(await fixture.run(args)).toMatchObject({ exitCode: 0 });
+  expect(await fixture.run(args)).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
+  settleDamagePreviewMedia(fixture);
   expect(existsSync(path)).toBe(false);
   expect(await inspect()).toMatchObject({ generationStatus: "partial", reason: before.reason, progress: before.progress, provenance: before.provenance, artifacts: [{ coverage: before.artifacts[0]!.coverage }] });
 });
@@ -171,7 +179,9 @@ it("allows idle cleanup after an explicit archive-only choice and reports reopen
   expect(await inspect()).toMatchObject({ outdated: false, media: { retention: { activeCatalogReview: true, protectedForReview: true } } });
   expect(await choose("archive-only", "synthetic-archive-only-again")).toMatchObject({ exitCode: 0 });
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(selected.updatedAt) + 31 * day);
-  expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-archive-only-cleanup", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0, result: { media: { state: "removed" } } });
+  expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-archive-only-cleanup", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0, result: { media: { state: "removing" } } });
+  settleDamagePreviewMedia(fixture);
+  expect((await inspect()).media.state).toBe("removed");
 });
 
 it("keeps unchanged media protected after Catalog Review completion without output acknowledgement", async () => {
@@ -197,6 +207,7 @@ it("reports expiry if cleanup wins while canonical export is validating the sour
   const touch = access.damagePreviews.touchMedia.bind(access.damagePreviews);
   access.damagePreviews.touchMedia = (requestId) => {
     createApplicationOperations(other).cleanupDamagePreviewMedia(id, { mediaToken: token, mutationKey: "synthetic-cleanup-during-export" });
+    cleanupDamagePreviewMedia(other);
     return touch(requestId);
   };
   const destination = join(fixture.operatorHostPath, "expired-during-export.mkv");
@@ -206,38 +217,39 @@ it("reports expiry if cleanup wins while canonical export is validating the sour
   } finally { other.close(); }
 });
 
-it("resumes durable deletion after process death, including already missing files", async () => {
+it("resumes a durable worker deletion after process death, including already missing files", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
   const args = ["damage-preview", "delete", id, "--key", "synthetic-crash-deletion", "--json", JSON.stringify({ mediaToken: before.media.token })];
+  const accepted = await fixture.run(args);
+  expect(accepted).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
   const access = fixture.openAccess();
-  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
-  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, prepare, (record) => { remove(record); throw new Error("Synthetic process death after unlink."); }, present);
-  expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 1 });
+  const complete = access.damagePreviews.completeMediaRemoval.bind(access.damagePreviews);
+  access.damagePreviews.completeMediaRemoval = (requestId, removalId, remove) => complete(requestId, removalId, (record) => { remove(record); throw new Error("Synthetic worker death after unlink."); });
+  try { expect(() => cleanupDamagePreviewMedia(access)).toThrow("Synthetic worker death"); } finally { access.close(); }
   expect(existsSync(path)).toBe(false);
   expect(await inspect()).toMatchObject({ media: { state: "removing", removal: { state: "pending" } } });
-  const restarted = fixture.openAccess();
-  try { cleanupDamagePreviewMedia(restarted); } finally { restarted.close(); }
-  const after = await inspect();
-  expect(after).toMatchObject({ media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] } }, provenance: before.provenance });
-  expect(await fixture.run(args)).toMatchObject({ exitCode: 0, result: after });
+  expect(await fixture.run(args)).toEqual(accepted);
+  settleDamagePreviewMedia(fixture);
+  expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] } }, provenance: before.provenance });
+  expect(await fixture.run(args)).toEqual(accepted);
 });
-
-it("replays a settled deletion after response projection fails without another filesystem mutation", async () => {
+it("keeps accepted removal durable after response projection fails and lets the worker settle it", async () => {
   const { fixture, id, path, inspect } = await setup();
   const token = (await inspect()).media.token;
-  const args = ["damage-preview", "delete", id, "--key", "synthetic-settled-response-loss", "--json", JSON.stringify({ mediaToken: token })];
+  const args = ["damage-preview", "delete", id, "--key", "synthetic-removal-response-loss", "--json", JSON.stringify({ mediaToken: token })];
   const access = fixture.openAccess();
-  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
-  access.damagePreviews.removeMedia = (input, prepare, remove) => removeMedia(input, prepare, remove, () => { throw new Error("Synthetic process death before response projection"); });
+  const request = access.damagePreviews.requestMediaRemoval.bind(access.damagePreviews);
+  access.damagePreviews.requestMediaRemoval = (input, prepare) => request(input, prepare, () => { throw new Error("Synthetic response loss after acceptance"); });
   expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 1 });
-  expect(existsSync(path)).toBe(false);
+  expect(existsSync(path)).toBe(true);
+  expect((await inspect()).media.removal?.state).toBe("pending");
+  settleDamagePreviewMedia(fixture);
   expect((await inspect()).media.removal?.state).toBe("complete");
-  const first = await fixture.run(args);
-  expect(first).toMatchObject({ exitCode: 0, result: { media: { removal: { outcomes: [{ outcome: "removed" }] } } } });
-  expect(await fixture.run(args)).toEqual(first);
+  const replay = await fixture.run(args);
+  expect(replay).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
+  expect(await fixture.run(args)).toEqual(replay);
 });
-
 it("rejects a substituted symlink without following it, and permits reviewed deletion after it is removed", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
@@ -249,23 +261,34 @@ it("rejects a substituted symlink without following it, and permits reviewed del
   expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-unsafe-removal", "--json", JSON.stringify({ mediaToken: current.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", reasons: [{ code: "DAMAGE_PREVIEW_MEDIA_UNSAFE" }] } } });
   expect(existsSync(fixture.databasePath)).toBe(true);
   unlinkSync(path);
-  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-retry-removal", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0, result: { media: { state: "removed", removal: { outcomes: [{ outcome: "already_missing" }] } } } });
+  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-retry-removal", "--json", JSON.stringify({ mediaToken: (await inspect()).media.token })])).toMatchObject({ exitCode: 0, result: { media: { state: "removing" } } });
+  settleDamagePreviewMedia(fixture);
+  expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { outcomes: [{ outcome: "already_missing" }] } } });
 });
 
-it("keeps an unflushed unlink failed across retries until the directory can be synchronized", async () => {
+it("keeps an unflushed worker unlink failed across explicit retries until directory sync succeeds", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
   const failSync = vi.spyOn(fs, "fsyncSync").mockImplementation(() => { throw Object.assign(new Error("Synthetic directory sync failure"), { code: "EIO" }); });
   syncBuiltinESMExports();
   const remove = (key: string, mediaToken: string) => fixture.run(["damage-preview", "delete", id, "--key", key, "--json", JSON.stringify({ mediaToken })]);
-  expect(await remove("synthetic-unflushed-unlink", before.media.token)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  const accepted = await remove("synthetic-unflushed-unlink", before.media.token);
+  expect(accepted).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
+  settleDamagePreviewMedia(fixture);
+  expect((await inspect()).media.removal?.state).toBe("failed");
   expect(existsSync(path)).toBe(false);
-  // This retry sees ENOENT. It must still fail while directory sync fails.
-  expect(await remove("synthetic-still-unflushed", (await inspect()).media.token)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  expect(await remove("synthetic-unflushed-unlink", before.media.token)).toEqual(accepted);
+  settleDamagePreviewMedia(fixture);
+  expect((await inspect()).media.removal?.state).toBe("failed");
+  // A new explicit request observes ENOENT, but must still synchronize the directory.
+  expect(await remove("synthetic-still-unflushed", (await inspect()).media.token)).toMatchObject({ exitCode: 0 });
+  settleDamagePreviewMedia(fixture);
+  expect((await inspect()).media.removal?.state).toBe("failed");
   failSync.mockRestore(); syncBuiltinESMExports();
-  expect(await remove("synthetic-synchronized-removal", (await inspect()).media.token)).toMatchObject({ exitCode: 0, result: { media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] }, history: [{ state: "failed" }, { state: "failed" }] } } });
+  expect(await remove("synthetic-synchronized-removal", (await inspect()).media.token)).toMatchObject({ exitCode: 0 });
+  settleDamagePreviewMedia(fixture);
+  expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] }, history: [{ state: "failed" }, { state: "failed" }] } });
 });
-
 it("reports storage inspection failure separately from proven missing media", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
@@ -281,21 +304,19 @@ it("reports storage inspection failure separately from proven missing media", as
   expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-storage-fault-delete", "--json", JSON.stringify({ mediaToken: unavailable.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" } } });
 });
 
-it("preserves a replacement file when an interrupted deletion resumes", async () => {
+it("preserves a replacement file when the worker resumes an admitted removal", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
-  const args = ["damage-preview", "delete", id, "--key", "synthetic-crash-before-unlink", "--json", JSON.stringify({ mediaToken: before.media.token })];
-  const access = fixture.openAccess();
-  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
-  access.damagePreviews.removeMedia = (input, prepare, _remove, present) => removeMedia(input, prepare, () => { throw new Error("Synthetic process death before unlink."); }, present);
-  expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 1 });
+  const args = ["damage-preview", "delete", id, "--key", "synthetic-replacement-before-worker", "--json", JSON.stringify({ mediaToken: before.media.token })];
+  const accepted = await fixture.run(args);
+  expect(accepted.exitCode).toBe(0);
   const replacement = Buffer.from("synthetic replacement media that was not reviewed");
   writeFileSync(path, replacement);
-  expect(await fixture.run(args)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  settleDamagePreviewMedia(fixture);
+  expect(await fixture.run(args)).toEqual(accepted);
   expect(readFileSync(path)).toEqual(replacement);
   expect(await inspect()).toMatchObject({ provenance: before.provenance, media: { removal: { state: "failed" } } });
 });
-
 it("does not adopt a replacement file during deletion admission", async () => {
   const { fixture, id, path, inspect } = await setup();
   const before = await inspect();
@@ -309,6 +330,8 @@ it("does not adopt a replacement file during deletion admission", async () => {
     return result;
   };
   const args = ["damage-preview", "delete", id, "--key", "synthetic-admission-file-race", "--json", JSON.stringify({ mediaToken: before.media.token })];
-  expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED" } } });
+  expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
+  settleDamagePreviewMedia(fixture);
+  expect((await inspect()).media.removal?.state).toBe("failed");
   expect(readFileSync(path)).toEqual(replacement);
 });

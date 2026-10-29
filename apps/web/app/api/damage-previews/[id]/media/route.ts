@@ -16,7 +16,8 @@ export async function createDamagePreviewMediaRemovalRoute(request: Request, id:
     let input: unknown;
     try { input = await request.json(); } catch { throw new InvalidDamagePreviewInputError("Invalid JSON input."); }
     const operations = createApplicationOperations(getAccess());
-    return response(request.method === "DELETE" ? operations.deleteDamagePreviewMedia(id, input) : operations.cleanupDamagePreviewMedia(id, input));
+    const accepted = request.method === "DELETE" ? operations.deleteDamagePreviewMedia(id, input) : operations.cleanupDamagePreviewMedia(id, input);
+    return response(accepted, accepted.media.removal?.state === "pending" ? 202 : 200);
   } catch (error) {
     if (error instanceof InvalidDamagePreviewInputError || error instanceof InvalidMutationKeyError) return response({ error: { code: "INVALID_ARGUMENTS", message: error.message } }, 400);
     if (error instanceof RecordNotFoundError) return response({ error: { code: "NOT_FOUND", message: error.message } }, 404);

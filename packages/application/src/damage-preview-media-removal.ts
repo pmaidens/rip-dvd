@@ -51,7 +51,7 @@ export function removeDamagePreviewMedia(access: DataAccess, id: string, raw: un
   if (typeof input.mediaToken !== "string" || input.mediaToken.length > 256) throw new InvalidDamagePreviewInputError("A reviewed media token is required.");
   let result: ReturnType<typeof describeDamagePreview>;
   try {
-    result = access.damagePreviews.removeMedia({ id, mutationKey, mediaToken: input.mediaToken, cause }, (record) => {
+    result = access.damagePreviews.requestMediaRemoval({ id, mutationKey, mediaToken: input.mediaToken, cause }, (record) => {
       const targets = previewMediaTargets(record);
       const output = observeDamagePreviewOutputAcknowledgements(access, record);
       const originalRecord = canonicalPublicationJson(record);
@@ -72,7 +72,7 @@ export function removeDamagePreviewMedia(access: DataAccess, id: string, raw: un
           check(describeDamagePreview(access, currentRecord, targets, false, output.inspection));
         },
       };
-    }, removeFiles, (record) => describeDamagePreview(access, record));
+    }, (record) => describeDamagePreview(access, record));
   } catch (error) {
     if (error instanceof DamagePreviewRejectedError && error.current === null) {
       const current = access.damagePreviews.find(id);
@@ -80,8 +80,19 @@ export function removeDamagePreviewMedia(access: DataAccess, id: string, raw: un
     }
     throw error;
   }
-  if (result.media.state === "removal_failed") throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", message: "Some media could not be removed. Review the durable outcomes before retrying with a new key." }], result);
   return result;
+}
+
+function removeWorkerFiles(access: DataAccess, record: DamagePreviewRecord): DamagePreviewMediaRemoval["outcomes"] {
+  if (record.mediaRemoval!.cause === "idle_cleanup") {
+    const current = describeDamagePreview(access, record);
+    const retention = current.media.retention;
+    if (retention === null || retention.protectedForReview || retention.eligibleAt === null ||
+        Date.parse(retention.eligibleAt) > Date.now()) {
+      return previewMediaTargets(record).map(({ identity }) => ({ identity, outcome: "retained", reasonCode: "DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED" }));
+    }
+  }
+  return removeFiles(record);
 }
 
 export function cleanupDamagePreviewMedia(access: DataAccess) {
@@ -92,13 +103,20 @@ export function cleanupDamagePreviewMedia(access: DataAccess) {
     const pending = record.mediaRemoval?.state === "pending" ? record.mediaRemoval : null;
     if (!pending && record.artifacts.length === 0 && record.commands.length === 0) continue;
     if (!pending && Date.parse(record.mediaLastAccessedAt ?? record.updatedAt) + DAMAGE_PREVIEW_IDLE_MS > Date.now()) continue;
-    const current = pending ? null : describeDamagePreview(access, record);
-    if (!pending && !current!.media.cleanup.available) continue;
+    if (pending) {
+      const settled = access.damagePreviews.completeMediaRemoval(record.id, pending.requestId, (current) => removeWorkerFiles(access, current));
+      if (settled) results.push(describeDamagePreview(access, settled));
+      continue;
+    }
+    const current = describeDamagePreview(access, record);
+    if (!current.media.cleanup.available) continue;
     try {
-      results.push(removeDamagePreviewMedia(access, record.id, {
-        mediaToken: pending?.mediaToken ?? current!.media.token,
-        mutationKey: pending?.mutationKey ?? `preview-cleanup:${record.id}:${current!.media.token.slice(-64)}`,
-      }, pending?.cause ?? "idle_cleanup"));
+      const accepted = removeDamagePreviewMedia(access, record.id, {
+        mediaToken: current.media.token,
+        mutationKey: `preview-cleanup:${record.id}:${current.media.token.slice(-64)}`,
+      }, "idle_cleanup");
+      const settled = access.damagePreviews.completeMediaRemoval(record.id, accepted.media.removal!.requestId, (current) => removeWorkerFiles(access, current));
+      if (settled) results.push(describeDamagePreview(access, settled));
     } catch (error) {
       if (!(error instanceof DamagePreviewRejectedError)) throw error;
       // A concurrent access or explicit deletion wins over this cleanup pass.

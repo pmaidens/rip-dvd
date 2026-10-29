@@ -21,14 +21,15 @@ export interface DamagePreviewStreamMapping {
   subtitles: DamagePreviewResolvedSubtitle[];
 }
 export interface DamagePreviewMediaRemoval {
+  requestId: string;
   mutationKey: string;
   mediaToken: string;
   cause: "explicit_deletion" | "idle_cleanup";
-  state: "pending" | "complete" | "failed";
+  state: "pending" | "complete" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;
   expectedFiles: { identity: string; filesystemIdentity: string | null }[];
-  outcomes: { identity: string; outcome: "removed" | "already_missing" | "failed"; reasonCode: string | null }[];
+  outcomes: { identity: string; outcome: "removed" | "already_missing" | "failed" | "retained"; reasonCode: string | null }[];
 }
 export interface DamagePreviewRecord {
   id: string;
@@ -67,12 +68,12 @@ export interface DamagePreviewAccess {
   claim(workerId: string): DamagePreviewRecord | null;
   update(record: DamagePreviewRecord): void;
   touchMedia(id: string): boolean;
-  removeMedia<T>(input: { id: string; mutationKey: string; mediaToken: string; cause: DamagePreviewMediaRemoval["cause"] },
+  requestMediaRemoval<T>(input: { id: string; mutationKey: string; mediaToken: string; cause: DamagePreviewMediaRemoval["cause"] },
     prepare: (record: DamagePreviewRecord) => {
       expectedFiles: DamagePreviewMediaRemoval["expectedFiles"];
       /** Database-only recheck inside deletion admission. */
       assertCurrent(record: DamagePreviewRecord): void;
     },
-    remove: (record: DamagePreviewRecord) => DamagePreviewMediaRemoval["outcomes"],
     present: (record: DamagePreviewRecord) => T): T;
+  completeMediaRemoval(id: string, requestId: string, remove: (record: DamagePreviewRecord) => DamagePreviewMediaRemoval["outcomes"]): DamagePreviewRecord | null;
 }

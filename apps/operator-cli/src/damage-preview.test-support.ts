@@ -2,7 +2,7 @@ import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput, 
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DamagePreviewInspection } from "@rip-dvd/application";
+import { cleanupDamagePreviewMedia, type DamagePreviewInspection } from "@rip-dvd/application";
 import { encodeOutputFilesystemIdentity } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -119,4 +119,10 @@ export async function seedDamagePreviewWithNormalOutput(fixture: ReturnType<type
     .run(encodeOutputFilesystemIdentity(lstatSync(output.outputPath)), Date.now(), output.id);
   sqlite.close();
   return { ...preview, output };
+}
+
+/** The writable worker owns filesystem mutation; public commands only admit it. */
+export function settleDamagePreviewMedia(fixture: ReturnType<typeof createOperatorWorkflowFixture>) {
+  const worker = fixture.openAccess();
+  try { return cleanupDamagePreviewMedia(worker); } finally { worker.close(); }
 }

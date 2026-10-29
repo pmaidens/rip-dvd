@@ -3,7 +3,7 @@ import { unlinkSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { encodeOutputArtifactIdentity, type EncodeOutputInspection, type DamagePreviewInspection } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
-import { seedDamagePreviewWithNormalOutput } from "../../../../../operator-cli/src/damage-preview.test-support.js";
+import { seedDamagePreviewWithNormalOutput, settleDamagePreviewMedia } from "../../../../../operator-cli/src/damage-preview.test-support.js";
 import { createDamagePreviewRoute } from "./route";
 import { createDamagePreviewMediaRemovalRoute } from "./media/route";
 import { seedProvedPreviewOutput } from "../../../../../operator-cli/src/damage-preview-source-retention.test-support.js";
@@ -56,7 +56,10 @@ it("shares exact-source receipt release and keyed idle cleanup between HTTP and 
     expect(await web.json()).toEqual(await inspectPreview());
     const input = { mutationKey: "synthetic-http-proved-cleanup", mediaToken: current.media.token };
     const cleanup = await createDamagePreviewMediaRemovalRoute(new Request(`${origin}/api/damage-previews/${id}/media`, { method: "POST", headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify(input) }), id, () => access, () => origin);
-    expect(cleanup.status).toBe(200);
+    expect(cleanup.status).toBe(202);
     expect(await cleanup.json()).toEqual((await fixture.run(["damage-preview", "cleanup", id, "--key", input.mutationKey, "--json", JSON.stringify({ mediaToken: input.mediaToken })])).result);
+    expect((await inspectPreview()).media.removal?.state).toBe("pending");
+    settleDamagePreviewMedia(fixture);
+    expect((await inspectPreview()).media.removal?.state).toBe("complete");
   } finally { access.close(); }
 });

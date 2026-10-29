@@ -208,7 +208,8 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         {preview.media.retention?.protectedForReview ? <p>Current media is protected from routine cleanup while review or finished-output inspection still needs it.</p> : null}
         {preview.media.retention?.awaitingFinishedOutputInspection ? <p>This sample remains protected until inspection of a related finished output is proved.</p> : null}
         {preview.finishedOutputInspection?.outputs.some((output) => output.acknowledgementStatus === "acknowledged") ? <p>{preview.finishedOutputInspection.retentionSatisfied ? "An applicable normal output inspection acknowledgement proves the recorded source relationship. Active Catalog Review still protects current media." : "A normal output inspection acknowledgement is recorded. Its source relationship or validation proof is unavailable, so it does not release retention."}</p> : null}
-        {preview.media.removal ? <p>Removal: {preview.media.removal.cause}, {preview.media.removal.state}.</p> : null}
+        {preview.media.removal ? <p>Removal: {preview.media.removal.cause}, {preview.media.removal.state}. Request {preview.media.removal.requestId}.</p> : null}
+        {preview.media.removal?.state === "pending" ? <p>Removal is queued for the Encode worker. Refresh preview status to see completion or failure.</p> : null}
         <button type="button" disabled={busy || !preview.media.deletion.available} onClick={() => void deleteMedia()}>Delete preview media</button>
         {preview.media.deletion.reasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
         {preview.artifacts.map((artifact) => <p key={artifact.identity}>

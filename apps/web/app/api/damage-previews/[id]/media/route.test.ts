@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { createOperatorWorkflowFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
-import { seedRetainedDamagePreview } from "../../../../../../operator-cli/src/damage-preview.test-support.js";
+import { seedRetainedDamagePreview, settleDamagePreviewMedia } from "../../../../../../operator-cli/src/damage-preview.test-support.js";
 import { advanceCommittedArchiveEvidence } from "../../../../../../operator-cli/src/archive-evidence.test-support.js";
 import { createDamagePreviewMediaRemovalRoute } from "./route";
 import { createDamagePreviewRoute } from "../route";
@@ -28,6 +28,8 @@ it("shares deletion authorization, availability, stale evidence and replay with 
     const deleted = await cli("delete");
     expect(deleted.exitCode).toBe(0);
     expect(await web().then((response) => response.json())).toEqual(deleted.result);
+    expect(existsSync(path)).toBe(true);
+    settleDamagePreviewMedia(fixture);
     expect(existsSync(path)).toBe(false);
     const replayedCancel = await createDamagePreviewRoute(new Request(`${origin}/api/damage-previews/${id}`, { method: "DELETE", headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify({ mutationKey: cancelKey }) }), id, () => access, () => origin);
     expect(replayedCancel.status).toBe(200);
@@ -46,8 +48,10 @@ it("shares idle cleanup outcomes through HTTP and CLI while preserving original 
   try {
     const input = { mutationKey: "synthetic-web-cleanup", mediaToken: (await inspect()).media.token };
     const response = await createDamagePreviewMediaRemovalRoute(new Request(`http://localhost:3000/api/damage-previews/${id}/media`, { method: "POST", headers: { Origin: "http://localhost:3000", Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify(input) }), id, () => access, () => "http://localhost:3000");
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(await response.json()).toEqual((await fixture.run(["damage-preview", "cleanup", id, "--key", input.mutationKey, "--json", JSON.stringify({ mediaToken: input.mediaToken })])).result);
+    expect(existsSync(path)).toBe(true);
+    settleDamagePreviewMedia(fixture);
     expect(existsSync(path)).toBe(false);
     expect(await inspect()).toMatchObject({ provenance: before.provenance, artifacts: [{ coverage: before.artifacts[0]!.coverage }], media: { removal: { cause: "idle_cleanup" } } });
   } finally { access.close(); }

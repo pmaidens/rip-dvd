@@ -940,22 +940,26 @@ test("Damage Preview requests, waits for and cancels reviewed work with visible 
 
 test("Damage Preview media deletion keeps provenance and coverage visible", async ({ page }, testInfo) => {
   const requestId = "11111111-2222-4333-8444-666666666666";
+  let requested = false;
   let deleted = false;
   const state = () => ({
     schemaVersion: 1, id: requestId, status: "partial", generationStatus: "partial", outdated: false, outdatedReasons: [],
     reason: { code: "SYNTHETIC_INTERRUPTION", message: "Generation was interrupted." }, progress: { completedClips: 1, totalClips: 2, percent: null },
-    media: { state: deleted ? "removed" : "retained", token: deleted ? "synthetic-removed-token" : "synthetic-retained-token", retention: null,
-      removal: deleted ? { cause: "explicit_deletion", state: "complete" } : null, deletion: { available: !deleted, reasons: [] } },
+    media: { state: deleted ? "removed" : requested ? "removing" : "retained", token: deleted ? "synthetic-removed-token" : "synthetic-retained-token", retention: null,
+      removal: requested ? { requestId: "synthetic-removal-request", cause: "explicit_deletion", state: deleted ? "complete" : "pending" } : null, deletion: { available: !requested, reasons: [] } },
     artifacts: [{ identity: `damage-preview-v1.${requestId}.0`, sizeBytes: 128, coverage: { startMilliseconds: 1000, endMilliseconds: 6000 },
-      media: { state: deleted ? "removed" : "retained", reasonCode: deleted ? "DAMAGE_PREVIEW_MEDIA_DELETED" : null } }],
+      media: { state: deleted ? "removed" : requested ? "removing" : "retained", reasonCode: deleted ? "DAMAGE_PREVIEW_MEDIA_DELETED" : requested ? "DAMAGE_PREVIEW_MEDIA_REMOVING" : null } }],
     provenance: { checkpoint: { manifestRevision: 1 }, streams: { audio: [128], subtitles: [] } },
     warning: "Partial media never means no damage.",
   });
   await page.route(/\/api\/damage-previews\/[^/]+(?:\/media)?$/, async (route) => {
     if (route.request().method() === "DELETE") {
       expect(route.request().postDataJSON()).toMatchObject({ mediaToken: "synthetic-retained-token", mutationKey: expect.any(String) });
-      deleted = true;
+      requested = true;
+      await route.fulfill({ status: 202, json: state() });
+      return;
     }
+    if (requested) deleted = true;
     await route.fulfill({ json: state() });
   });
   await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
@@ -965,7 +969,10 @@ test("Damage Preview media deletion keeps provenance and coverage visible", asyn
   await preview.getByRole("button", { name: "Refresh preview status" }).click();
   await expect(preview.getByRole("link", { name: /Download canonical MKV/ })).toBeVisible();
   await preview.getByRole("button", { name: "Delete preview media" }).click();
-  await expect(preview.getByText("Removal: explicit_deletion, complete.")).toBeVisible();
+  await expect(preview.getByText(/Removal: explicit_deletion, pending/)).toBeVisible();
+  await expect(preview.getByText(/Removal is queued for the Encode worker/)).toBeVisible();
+  await preview.getByRole("button", { name: "Refresh preview status" }).click();
+  await expect(preview.getByText(/Removal: explicit_deletion, complete/)).toBeVisible();
   await expect(preview.getByRole("link", { name: /Download canonical MKV/ })).toHaveCount(0);
   await expect(preview.getByText(/Actual coverage: 1 s to 6 s/)).toBeVisible();
   await expect(preview.getByText(/Generation was interrupted/)).toBeVisible();

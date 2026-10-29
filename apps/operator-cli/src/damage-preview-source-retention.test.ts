@@ -6,6 +6,7 @@ import { claimNextEncodeJob, encodeOutputArtifactIdentity, retainedEncodeOutputA
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { withEvidenceGuardsDisabled } from "./archive-evidence.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import { settleDamagePreviewMedia } from "./damage-preview.test-support.js";
 import { seedProvedPreviewOutput } from "./damage-preview-source-retention.test-support.js";
 import { openEncodeSourceTestAccess } from "./encode-source-decision.test-support.js";
 import { acceptReadinessContent, assessmentMappings } from "./encoding-readiness.test-support.js";
@@ -31,7 +32,10 @@ it("releases a current sample only after exact-generation source acknowledgement
   expect(await fixture.run(args)).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_CLEANUP_UNAVAILABLE" } } });
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 30 * day);
   const removed = await fixture.run(args);
-  expect(removed).toMatchObject({ exitCode: 0, result: { generationStatus: "complete", provenance: before.provenance, media: { state: "removed", removal: { cause: "idle_cleanup" } } } });
+  expect(removed).toMatchObject({ exitCode: 0, result: { generationStatus: "complete", provenance: before.provenance, media: { state: "removing", removal: { cause: "idle_cleanup", state: "pending" } } } });
+  expect(existsSync(path)).toBe(true);
+  settleDamagePreviewMedia(fixture);
+  expect((await inspectPreview()).media.removal?.state).toBe("complete");
   expect(existsSync(path)).toBe(false);
   writeFileSync(claim.outputPath, "synthetic replacement after preview removal");
   expect(await fixture.run(args)).toEqual(removed);
@@ -46,6 +50,29 @@ it("keeps active Catalog Review protected independently of an applicable receipt
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
   expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: true }, media: { retention: { protectedForReview: true, activeCatalogReview: true, awaitingFinishedOutputInspection: false, reasonCodes: ["CATALOG_REVIEW_ACTIVE"] } } });
   expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-active-review-cleanup", "--json", JSON.stringify({ mediaToken: current.media.token })])).toMatchObject({ exitCode: 2 });
+});
+
+it.each(["review", "output"] as const)("cancels pending idle cleanup when %s evidence changes before the worker starts", async (change) => {
+  const { fixture, id, path, claim, seeded, inspectPreview, acknowledge } = await setup();
+  await acknowledge(`synthetic-before-pending-${change}`);
+  const current = await inspectPreview();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
+  const args = ["damage-preview", "cleanup", id, "--key", `synthetic-pending-${change}`, "--json", JSON.stringify({ mediaToken: current.media.token })];
+  const accepted = await fixture.run(args);
+  expect(accepted).toMatchObject({ exitCode: 0, result: { media: { removal: { state: "pending" } } } });
+  if (change === "review") withEvidenceGuardsDisabled(fixture.databasePath, (db) => db.prepare("UPDATE original_disc_archives SET catalog_reviewed_at = NULL, catalog_review_outcome = 'needs_review' WHERE id = ?").run(seeded.archive.id));
+  else writeFileSync(claim.outputPath, "synthetic replacement before cleanup execution");
+  settleDamagePreviewMedia(fixture);
+  const retained = await inspectPreview();
+  expect(retained).toMatchObject({ media: { state: "retained", retention: { protectedForReview: true }, removal: { state: "cancelled", outcomes: [{ outcome: "retained", reasonCode: "DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED" }] } } });
+  expect(existsSync(path)).toBe(true);
+  expect(await fixture.run(args)).toEqual(accepted);
+  // A cancelled cleanup no longer fences read-only review or a deliberate deletion.
+  expect(await fixture.run(["damage-preview", "export", retained.artifacts[0]!.identity, "--destination", `${fixture.operatorHostPath}/retained-${change}.mkv`])).toMatchObject({ exitCode: 0 });
+  const refreshed = await inspectPreview();
+  expect(await fixture.run(["damage-preview", "delete", id, "--key", `synthetic-explicit-after-${change}`, "--json", JSON.stringify({ mediaToken: refreshed.media.token })])).toMatchObject({ exitCode: 0 });
+  settleDamagePreviewMedia(fixture);
+  expect((await inspectPreview()).media.state).toBe("removed");
 });
 
 it("protects a current preview when the acknowledged output used different versioned intended settings", async () => {
@@ -67,13 +94,13 @@ it("rejects changed output authority between staged source proof and cleanup adm
   const current = await inspectPreview();
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
   const access = fixture.openAccess();
-  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
-  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, (record) => {
+  const removeMedia = access.damagePreviews.requestMediaRemoval.bind(access.damagePreviews);
+  access.damagePreviews.requestMediaRemoval = (input, prepare, present) => removeMedia(input, (record) => {
     const staged = prepare(record);
     const db = new DatabaseSync(fixture.databasePath);
     try { db.prepare("UPDATE encode_jobs SET output_validated_at = output_validated_at + 1 WHERE id = ?").run(claim.id); } finally { db.close(); }
     return staged;
-  }, remove, present);
+  }, present);
   expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-staged-proof-change", "--json", JSON.stringify({ mediaToken: current.media.token })], undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_STALE" } } });
   expect(existsSync(path)).toBe(true);
   expect((await inspectPreview()).media.removal).toBeNull();
