@@ -15360,6 +15360,8 @@ export function createDataAccessInternal(
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
           listForDiscSelection: (id) =>
             access.encodeJobs.listForDiscSelection(id),
+          listForOriginalDiscArchive: (id, options) =>
+            access.encodeJobs.listForOriginalDiscArchive(id, options),
           listActiveForDiscSelections: (options) =>
             access.encodeJobs.listActiveForDiscSelections(options),
           listDvdTitleDamageAcceptanceWithdrawalWork: (options) =>
@@ -23440,6 +23442,16 @@ export function createDataAccessInternal(
           .where(eq(encodeJobs.discSelectionId, id))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
+      },
+      listForOriginalDiscArchive(id, options) {
+        if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 1_000) {
+          throw new DomainInvariantError("Archive Encode Job lookup requires a limit between 1 and 1000.");
+        }
+        return database.select({ job: encodeJobs }).from(encodeJobs)
+          .innerJoin(discSelections, eq(encodeJobs.discSelectionId, discSelections.id))
+          .where(eq(discSelections.originalDiscArchiveId, id))
+          .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
+          .limit(options.limit).all().map(({ job }) => job);
       },
       listActiveForDiscSelections(options) {
         if (

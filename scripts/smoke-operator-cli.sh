@@ -145,6 +145,17 @@ set -e
 [ "$preview_status" -eq 2 ]
 printf '%s\n' "$preview_output" | assert_json_fields 'error.code=NOT_FOUND'
 
+for action in delete cleanup; do
+  set +e
+  removal_output="$(invoke damage-preview "$action" synthetic-missing-request \
+    --key "synthetic-smoke-$action" --json '{"mediaToken":"synthetic-reviewed-media"}' \
+    2>"$temporary_directory/preview-removal.stderr")"
+  removal_status=$?
+  set -e
+  [ "$removal_status" -eq 2 ]
+  printf '%s\n' "$removal_output" | assert_json_fields 'error.code=NOT_FOUND'
+done
+
 set +e
 verification_output="$(invoke archive-recovery inspect-verification \
   synthetic-missing-recovery \
@@ -289,13 +300,26 @@ printf 'Operator CLI and notification dispatcher deployment smoke passed.\n'
 
 # Author canonical synthetic media inside the service namespace, then export
 # through the installed caller wrapper. No caller directory is bind-mounted.
-preview_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node operator-cli --input-type=module <<'JAVASCRIPT'
+docker compose --project-name "$project_name" build encode-worker
+# Only this synthetic request directory is initialized by root. The ordinary
+# worker writes its media; web and CLI retain their read-only library mounts.
+docker compose --project-name "$project_name" run --rm --no-deps --user 0:0 \
+  --entrypoint node encode-worker --input-type=module <<'JAVASCRIPT'
+import { mkdirSync, chownSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadConfig } from './apps/encode-worker/node_modules/@rip-dvd/config/dist/index.js';
+const directory = join(loadConfig().mediaLibraryPath, '.damage-previews', '11111111-2222-4333-8444-555555555555');
+mkdirSync(directory, { recursive: true });
+chownSync(directory, 1000, 1000);
+JAVASCRIPT
+preview_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node encode-worker --input-type=module <<'JAVASCRIPT'
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createLegacySidecarDataAccess } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
-import { loadConfig } from './apps/operator-cli/node_modules/@rip-dvd/config/dist/index.js';
+import { createLegacySidecarDataAccess } from './apps/encode-worker/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
+import { loadConfig } from './apps/encode-worker/node_modules/@rip-dvd/config/dist/index.js';
 const config = loadConfig();
 const access = createLegacySidecarDataAccess({ databasePath: config.databasePath });
 const drive = access.catalog.upsertOpticalDrive({ devicePath: '/dev/synthetic-preview-export', isPresent: true });
@@ -305,13 +329,13 @@ access.catalog.updateDetectedDiscStatus(disc.id, 'approved');
 const archive = access.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: 'dvd', archiveFormat: 'iso', archivePath: '/data/synthetic-preview.iso', fingerprint: disc.fingerprint });
 const id = '11111111-2222-4333-8444-555555555555';
 const identity = `damage-preview-v1.${id}.0`;
-const path = '/data/synthetic-preview-export.mkv';
+const path = join(config.mediaLibraryPath, '.damage-previews', id, '0.mkv');
 execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=10', '-t', '1', '-c:v', 'ffv1', path], { stdio: 'pipe' });
 const bytes = readFileSync(path);
 const sha256 = createHash('sha256').update(bytes).digest('hex');
 const selection = { mode: 'ordinary_playback', titleIdentityObservationId: 'synthetic-observation', playbackRange: { startMilliseconds: 0, endMilliseconds: 1000 }, streams: { audio: [], subtitles: [] }, encodingProfileId: 'synthetic-profile' };
 const checkpoint = { manifestId: 'synthetic-manifest', manifestRevision: 1, manifestDigest: 'f'.repeat(64), publicationDigest: 'f'.repeat(64) };
-const record = { id, originalDiscArchiveId: archive.id, status: 'complete', preflightToken: 'synthetic-reviewed-token', selectionJson: JSON.stringify(selection), reviewJson: JSON.stringify({ reviewedRequest: { ...selection, checkpoint }, clips: [selection.playbackRange] }), workerId: null, cancellationRequested: false, reason: null, progress: { completedClips: 1, totalClips: 1, percent: 100 }, commands: [], toolVersions: { ffmpeg: 'synthetic-smoke' }, deviations: [], artifacts: [{ identity, path, sizeBytes: bytes.length, sha256, mediaType: 'video/x-matroska', coverage: selection.playbackRange, durationMilliseconds: 1000 }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+const record = { id, originalDiscArchiveId: archive.id, status: 'complete', preflightToken: 'synthetic-reviewed-token', selectionJson: JSON.stringify(selection), reviewJson: JSON.stringify({ reviewedRequest: { ...selection, originalDiscArchiveId: archive.id, archive: { fingerprint: archive.fingerprint, path: archive.archivePath, catalogRevision: archive.updatedAt.toISOString() }, recovery: null, title: null, sourceTitle: null, encodingProfile: null, checkpoint }, clips: [selection.playbackRange] }), workerId: null, cancellationRequested: false, reason: null, progress: { completedClips: 1, totalClips: 1, percent: 100 }, commands: [], toolVersions: { ffmpeg: 'synthetic-smoke' }, deviations: [], artifacts: [{ identity, path, sizeBytes: bytes.length, sha256, mediaType: 'video/x-matroska', coverage: selection.playbackRange, durationMilliseconds: 1000 }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 const sqlite = new DatabaseSync(config.databasePath);
 sqlite.prepare('INSERT INTO damage_previews (id, original_disc_archive_id, status, record, created_at) VALUES (?, ?, ?, ?, ?)').run(id, archive.id, record.status, JSON.stringify(record), Date.now());
 sqlite.close(); access.close();
@@ -340,6 +364,49 @@ invalid_preview_status=$?
 set -e
 [ "$invalid_preview_status" -eq 2 ]
 printf '%s\n' "$invalid_preview_export" | assert_json_fields 'error.code=EXPORT_DESTINATION_UNAVAILABLE'
+
+# Real installed CLI admission must work with read-only source and output mounts.
+# The configured writable Encode worker, started separately, owns the unlink.
+docker compose --project-name "$project_name" --profile maintenance config --format json | node --input-type=module -e '
+  let text=""; for await (const chunk of process.stdin) text+=chunk;
+  const config=JSON.parse(text);
+  for (const service of ["web","operator-cli"]) {
+    for (const target of ["/media/movies","/media/originals"]) {
+      if (!config.services[service].volumes.some(v=>v.target===target&&v.read_only===true)) process.exit(1);
+    }
+  }
+'
+preview_request='11111111-2222-4333-8444-555555555555'
+preview_state="$(invoke damage-preview inspect "$preview_request")"
+removal_input="$(printf '%s' "$preview_state" | node --input-type=module -e 'let text="";for await(const chunk of process.stdin)text+=chunk;process.stdout.write(JSON.stringify({mediaToken:JSON.parse(text).media.token}));')"
+removal_accepted="$(invoke damage-preview delete "$preview_request" --key synthetic-installed-preview-delete --json "$removal_input")"
+printf '%s\n' "$removal_accepted" | assert_json_fields 'media.state=removing' 'media.removal.state=pending'
+set +e
+pending_export="$(invoke damage-preview export "$preview_identity" --destination "$temporary_directory/pending-preview.mkv")"
+pending_export_status=$?
+set -e
+[ "$pending_export_status" -eq 2 ]
+printf '%s\n' "$pending_export" | assert_json_fields 'error.code=DAMAGE_PREVIEW_MEDIA_REMOVING'
+docker compose --project-name "$project_name" up --detach --no-deps encode-worker
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  completed_removal="$(invoke damage-preview inspect "$preview_request")"
+  if printf '%s\n' "$completed_removal" | assert_json_fields 'media.removal.state=complete'; then break; fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+[ "$attempt" -lt 30 ]
+printf '%s\n' "$completed_removal" | assert_json_fields 'media.state=removed' 'generationStatus=complete'
+docker compose --project-name "$project_name" stop --timeout 10 encode-worker
+removal_replayed="$(invoke damage-preview delete "$preview_request" --key synthetic-installed-preview-delete --json "$removal_input")"
+[ "$removal_replayed" = "$removal_accepted" ]
+set +e
+deleted_export="$(invoke damage-preview export "$preview_identity" --destination "$temporary_directory/deleted-preview.mkv")"
+deleted_export_status=$?
+set -e
+[ "$deleted_export_status" -eq 2 ]
+printf '%s\n' "$deleted_export" | assert_json_fields 'error.code=DAMAGE_PREVIEW_MEDIA_DELETED'
+printf 'Installed read-only CLI admission, writable worker removal and replay passed.\n'
 
 source_enqueue_help="$(invoke help encode-enqueue)"
 source_requeue_help="$(invoke help encode-requeue)"

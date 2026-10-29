@@ -77,7 +77,8 @@ export type EncodeOutputInspectionReasonCode =
   | "OUTPUT_IDENTITY_CHANGED"
   | "OUTPUT_CHANGED_DURING_INSPECTION"
   | "OUTPUT_AUTHORITY_CHANGED"
-  | "OUTPUT_PROBE_FAILED";
+  | "OUTPUT_PROBE_FAILED"
+  | "OUTPUT_PROBE_NOT_REQUESTED";
 
 export class InvalidEncodeOutputArtifactIdentityError extends Error {
   constructor() {
@@ -993,6 +994,65 @@ export async function inspectEncodeOutput(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
       !Number.isSafeInteger(offset) || offset < 0) throw new InvalidEncodeOutputInspectionInputError();
   const inspected = await inspectEncodeOutputEvidence(access, artifactIdentityInput, mediaProbe);
+  return withInspectionReceipts(access, inspected, limit, offset);
+}
+
+/** Recheck canonical file, authority, validation and provenance without invoking
+ * a media process. Retention uses the receipt's recorded validation result,
+ * never this metadata-only observation as a new validation or acknowledgement. */
+export function inspectEncodeOutputIdentity(access: DataAccess, artifactIdentity: string) {
+  const parsed = parseEncodeOutputArtifactIdentity(artifactIdentity);
+  const base = resolveEncodeOutputAuthority(access, parsed);
+  const present = (inspected: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) => {
+    const result = withInspectionReceipts(access, inspected, 1, 0);
+    const matchingGeneration = () => {
+      const identity = result.operatorInspection.generationIdentity;
+      const page = identity === null ? { receipts: [], truncated: false }
+        : access.encodeOutputInspectionReceipts.listForGeneration(result.artifact.provenance.encodeJobId, identity, 100);
+      return { receipts: page.receipts.map(presentInspectionReceipt).filter((receipt) =>
+        receipt.evidence.file.mutationRevision === result.artifact.file.mutationRevision &&
+        canonicalPublicationJson(receipt.evidence.provenance) === canonicalPublicationJson(result.artifact.provenance)), truncated: page.truncated };
+    };
+    const matching = matchingGeneration();
+    return { ...result, matchingGenerationReceipts: matching.receipts, matchingGenerationReceiptsTruncated: matching.truncated, isCurrent() {
+      // Database-only authority recheck for a surrounding admission transaction.
+      // The observed file metadata was captured before taking its writer lock.
+      try {
+        const current = resolveEncodeOutputAuthority(access, parsed);
+        const evidence = inspectionResponse(current, inspected.artifact.file,
+          unknownInspection("OUTPUT_PROBE_NOT_REQUESTED", "This identity check does not probe playback metadata."));
+        return current.authorityUnavailableReason === null &&
+          canonicalPublicationJson(withInspectionReceipts(access, evidence, 1, 0)) === canonicalPublicationJson(result) &&
+          canonicalPublicationJson(matchingGeneration()) === canonicalPublicationJson(matching);
+      } catch (error) {
+        if (error instanceof RecordNotFoundError) return false;
+        throw error;
+      }
+    } };
+  };
+  if (base.authorityUnavailableReason !== null) return present(fileUnavailable(base, "OUTPUT_AUTHORITY_CHANGED", base.authorityUnavailableReason));
+  let metadata: Stats;
+  try { metadata = lstatSync(base.outputPath); }
+  catch (error) {
+    const failure = filesystemFailure(error);
+    return present(fileUnavailable(base, failure.code, failure.reason));
+  }
+  const unsafe = fileIsRegularAndNonempty(metadata);
+  if (unsafe !== null) return present(fileUnavailable(base, unsafe.code, unsafe.reason));
+  if (base.recordedFilesystemIdentity !== null && (!matchesEncodeOutputFilesystemIdentity(base.recordedFilesystemIdentity, metadata) ||
+      (base.recordedChangeTimeMs !== undefined && metadata.ctimeMs !== base.recordedChangeTimeMs))) {
+    return present(fileUnavailable(base, "OUTPUT_IDENTITY_CHANGED", "The Encode Output no longer matches its recorded file identity."));
+  }
+  const changed = changedAuthorityResponse(access, parsed, base);
+  if (changed !== null) return present(changed);
+  return present(inspectionResponse(base, {
+    status: "available", identity: encodeOutputFilesystemIdentity(metadata), mutationRevision: fileMutationRevision(metadata),
+    sizeBytes: metadata.size, modifiedAt: metadata.mtime.toISOString(), completeness: "unknown",
+    identityContinuity: base.recordedFilesystemIdentity === null ? "not_recorded" : "verified",
+  }, unknownInspection("OUTPUT_PROBE_NOT_REQUESTED", "This identity check does not probe playback metadata.")));
+}
+
+function withInspectionReceipts(access: DataAccess, inspected: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>, limit: number, offset: number) {
   const artifact = inspected.artifact;
   // File and validation evidence distinguish generations even when a job is requeued.
   // Retaining the same normal output does not create a different generation.

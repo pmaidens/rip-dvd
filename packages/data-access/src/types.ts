@@ -2667,6 +2667,9 @@ export interface ArchiveRequestWaitingStatus {
 export interface EncodeJobAccess {
   find(id: EncodeJobId): EncodeJob | null;
   listForDiscSelection(id: DiscSelectionId): EncodeJob[];
+  /** Bounded current-catalog lookup, including historical selections. This
+   * discovers output candidates; it does not prove immutable source identity. */
+  listForOriginalDiscArchive(id: OriginalDiscArchiveId, options: { limit: number }): EncodeJob[];
   listActiveForDiscSelections(options: {
     discSelectionIds: readonly DiscSelectionId[];
     limit: number;
@@ -3091,6 +3094,7 @@ export interface ConsistentReadAccess {
     | "find"
     | "list"
     | "listForDiscSelection"
+    | "listForOriginalDiscArchive"
     | "listActiveForDiscSelections"
     | "listDvdTitleDamageAcceptanceWithdrawalWork"
     | "listActiveForOriginalDiscArchives"

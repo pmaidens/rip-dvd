@@ -31,4 +31,8 @@ export interface EncodeOutputInspectionReceiptAccess {
     nextOffset: number | null;
   };
   latestForGeneration(encodeJobId: EncodeJobId, generationIdentity: string): EncodeOutputInspectionReceiptRecord | null;
+  listForGeneration(encodeJobId: EncodeJobId, generationIdentity: string, limit: number): {
+    receipts: EncodeOutputInspectionReceiptRecord[];
+    truncated: boolean;
+  };
 }

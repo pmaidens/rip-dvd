@@ -29,19 +29,47 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     if (!updated) throw new Error("Damage Preview worker identity changed.");
     Object.assign(record, JSON.parse(String(updated.record)) as DamagePreviewRecord);
   }
-  function mutate(key: string, operation: string, input: unknown, action: () => DamagePreviewRecord) {
+  function mutate<T extends DamagePreviewRecord>(key: string, operation: string, input: unknown, action: () => T) {
     return transaction(() => {
       const semantic = JSON.stringify(input);
       const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(key);
       if (previous) {
         if (previous.operation !== operation || previous.semantic_input !== semantic) throw new MutationKeyConflictError();
-        return JSON.parse(String(previous.outcome)) as DamagePreviewRecord;
+        return JSON.parse(String(previous.outcome)) as T;
       }
       const result = action();
       sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(key, operation, semantic, JSON.stringify(result), now().getTime());
       return result;
     });
   }
+  function cancel(id: string, mutationKey: string): DamagePreviewRecord;
+  function cancel<T>(id: string, mutationKey: string, present: (record: DamagePreviewRecord) => T): T;
+  function cancel<T>(id: string, mutationKey: string, present?: (record: DamagePreviewRecord) => T): T | DamagePreviewRecord {
+    type CancellationReceipt = DamagePreviewRecord & { cancellationResult?: T };
+    const receipt = mutate<CancellationReceipt>(mutationKey, "damage-preview-cancel", { id }, () => {
+      const record = find(id);
+      if (!record) throw new RecordNotFoundError("Damage Preview", id);
+      if (["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status)) {
+        if (["queued", "waiting_for_checkpoint_or_ownership"].includes(record.status) && record.workerId === null) record.status = "cancelled";
+        record.cancellationRequested = true;
+        record.reason = { code: "CANCELLATION_REQUESTED", message: "Cancellation targets this Damage Preview request." };
+        update(record);
+      }
+      return record;
+    });
+    if (!present) return receipt;
+    if (Object.hasOwn(receipt, "cancellationResult")) return receipt.cancellationResult!;
+    // Project media outside the writer transaction, then save the first
+    // response once. Historical receipts use the same upgrade path.
+    const result = present(receipt);
+    return transaction(() => {
+      const current = JSON.parse(String(sqlite.prepare("SELECT outcome FROM mutation_invocations WHERE key = ?").get(mutationKey)!.outcome)) as CancellationReceipt;
+      if (Object.hasOwn(current, "cancellationResult")) return current.cancellationResult!;
+      sqlite.prepare("UPDATE mutation_invocations SET outcome = ? WHERE key = ?").run(JSON.stringify({ ...current, cancellationResult: result }), mutationKey);
+      return result;
+    });
+  }
+
   return {
     find,
     pendingForRecovery(archiveId) {
@@ -78,18 +106,7 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
         return record;
       });
     },
-    cancel(id, mutationKey) {
-      return mutate(mutationKey, "damage-preview-cancel", { id }, () => {
-        const record = find(id);
-        if (!record) throw new RecordNotFoundError("Damage Preview", id);
-        if (!["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status)) return record;
-        if (["queued", "waiting_for_checkpoint_or_ownership"].includes(record.status) && record.workerId === null) record.status = "cancelled";
-        record.cancellationRequested = true;
-        record.reason = { code: "CANCELLATION_REQUESTED", message: "Cancellation targets this Damage Preview request." };
-        update(record);
-        return record;
-      });
-    },
+    cancel,
     claim(workerId) {
       return transaction(() => {
         const row = sqlite.prepare("SELECT record FROM damage_previews WHERE status = 'queued' OR (status = 'waiting_for_checkpoint_or_ownership' AND json_extract(record, '$.workerId') IS NULL) ORDER BY rowid LIMIT 1").get();
@@ -102,5 +119,84 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
       });
     },
     update,
+    touchMedia(id, artifactIdentity) {
+      return sqlite.prepare(`UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND (
+        json_extract(record, '$.mediaRemoval') IS NULL OR json_extract(record, '$.mediaRemoval.state') = 'cancelled' OR (
+          json_extract(record, '$.mediaRemoval.state') = 'failed' AND json_extract(record, '$.mediaRemoval.cause') = 'idle_cleanup' AND
+          EXISTS (SELECT 1 FROM json_each(json_extract(record, '$.mediaRemoval.outcomes'))
+            WHERE json_extract(value, '$.identity') = ? AND json_extract(value, '$.outcome') = 'retained')
+        )) RETURNING id`).get(now().toISOString(), id, artifactIdentity ?? null) !== undefined;
+    },
+    requestMediaRemoval<T>(input: Parameters<DamagePreviewAccess["requestMediaRemoval"]>[0], prepare: Parameters<DamagePreviewAccess["requestMediaRemoval"]>[1], present: (record: DamagePreviewRecord) => T): T {
+      const operation = `damage-preview-${input.cause}`;
+      const semantic = JSON.stringify({ id: input.id, mediaToken: input.mediaToken });
+      type Receipt = { record: DamagePreviewRecord; result?: T };
+      const previousReceipt = (): Receipt | null => {
+        const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
+        if (!previous) return null;
+        if (previous.operation !== operation || previous.semantic_input !== semantic) throw new MutationKeyConflictError();
+        return JSON.parse(String(previous.outcome)) as Receipt;
+      };
+      const admit = (): Receipt => {
+        const previous = previousReceipt();
+        if (previous) return previous;
+        const observed = find(input.id);
+        if (!observed) throw new RecordNotFoundError("Damage Preview", input.id);
+        let prepared: ReturnType<typeof prepare>;
+        try { prepared = prepare(observed); }
+        catch (error) {
+          // A same-input winner takes precedence over stale observations from
+          // a slower caller that prepared outside the writer transaction.
+          const winner = previousReceipt();
+          if (winner) return winner;
+          throw error;
+        }
+        return transaction(() => {
+          const winner = previousReceipt();
+          if (winner) return winner;
+          const record = find(input.id);
+          if (!record) throw new RecordNotFoundError("Damage Preview", input.id);
+          prepared.assertCurrent(record);
+          record.mediaLastAccessedAt ??= record.updatedAt;
+          if (record.mediaRemoval) record.mediaRemovalHistory = [...record.mediaRemovalHistory ?? [], record.mediaRemoval];
+          record.mediaRemoval = { requestId: randomUUID(), mutationKey: input.mutationKey, mediaToken: input.mediaToken, cause: input.cause, state: "pending", startedAt: now().toISOString(), completedAt: null, expectedFiles: prepared.expectedFiles, outcomes: [] };
+          update(record);
+          const receipt: Receipt = { record };
+          sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(input.mutationKey, operation, semantic, JSON.stringify(receipt), now().getTime());
+          return receipt;
+        });
+      };
+      const pending = admit();
+      if (Object.hasOwn(pending, "result")) return pending.result!;
+      // The first response records acceptance, not filesystem completion.
+      // Worker settlement never rewrites this mutation's replay result.
+      let result: T;
+      try { result = present(pending.record); }
+      catch (error) {
+        const winner = previousReceipt()!;
+        if (Object.hasOwn(winner, "result")) return winner.result!;
+        throw error;
+      }
+      return transaction(() => {
+        const previous = previousReceipt()!;
+        if (Object.hasOwn(previous, "result")) return previous.result!;
+        sqlite.prepare("UPDATE mutation_invocations SET outcome = ? WHERE key = ?").run(JSON.stringify({ ...previous, result }), input.mutationKey);
+        return result;
+      });
+    },
+    completeMediaRemoval(id, requestId, remove) {
+      const observed = find(id);
+      if (!observed || observed.mediaRemoval?.requestId !== requestId || observed.mediaRemoval.state !== "pending") return observed;
+      // Only the writable worker supplies this callback. A crash leaves the
+      // admitted request pending so another worker can resume the same intent.
+      const outcomes = remove(observed);
+      return transaction(() => {
+        const current = find(id);
+        if (!current || current.mediaRemoval?.requestId !== requestId || current.mediaRemoval.state !== "pending") return current;
+        current.mediaRemoval = { ...current.mediaRemoval, state: outcomes.some((item) => item.outcome === "failed") ? "failed" : outcomes.some((item) => item.outcome === "retained") ? "cancelled" : "complete", completedAt: now().toISOString(), outcomes };
+        update(current);
+        return current;
+      });
+    },
   };
 }

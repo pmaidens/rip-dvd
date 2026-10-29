@@ -8,6 +8,8 @@ import { ArchiveImageOwnershipError, defaultArchiveImageOwnership, type ArchiveI
 import { parseMutationKey } from "./mutation-key.js";
 import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damage-preview-input.js";
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
+import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia, type previewMediaTargets } from "./damage-preview-media-state.js";
+import { inspectDamagePreviewOutputAcknowledgements, type DamagePreviewFinishedOutputInspection } from "./damage-preview-output-inspection.js";
 
 type Review = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
 export class DamagePreviewRejectedError extends Error {
@@ -20,18 +22,21 @@ function requiredRecord(access: DataAccess, id: string) {
   if (!record) throw new RecordNotFoundError("Damage Preview", id);
   return record;
 }
-function previewInputIdentity(review: Review): string {
+function previewMediaInputs(review: Review) {
   const request = review.reviewedRequest;
-  // Admission status and token format may change after Stop without changing
-  // the sample's source or intended content within the same Recovery attempt.
-  return canonicalPublicationJson(request === null ? null : {
-    ...request,
-    recovery: request.recovery ? { id: request.recovery.id, attemptId: request.recovery.attemptId } : null,
-  });
+  if (!request) return null;
+  const { recovery: _recovery, titleIdentityReviewSetIdentity: _reviewSet, archive, encodingProfile, ...selection } = request;
+  const { catalogRevision: _revision, ...source } = archive;
+  const { isActive: _active, ...intendedSettings } = encodingProfile ?? {};
+  return canonicalPublicationJson({ ...selection, archive: source, encodingProfile: encodingProfile === null ? null : intendedSettings });
 }
-export function presentDamagePreview(record: DamagePreviewRecord, current?: Review, superseded = false) {
+export function presentDamagePreview(record: DamagePreviewRecord, context: {
+  outdated?: boolean; retention?: ReturnType<typeof damagePreviewRetention>;
+  mediaTargets?: ReturnType<typeof previewMediaTargets>;
+} = {}) {
   const review = JSON.parse(record.reviewJson) as Review;
-  const outdated = superseded || (current !== undefined && previewInputIdentity(current) !== previewInputIdentity(review));
+  const outdated = context.outdated ?? false;
+  const { files, ...media } = presentDamagePreviewMedia(record, context.retention ?? null, context.mediaTargets);
   return {
     schemaVersion: 1, id: record.id, originalDiscArchiveId: record.originalDiscArchiveId,
     status: outdated && record.artifacts.length > 0 ? "outdated" : record.status,
@@ -44,7 +49,9 @@ export function presentDamagePreview(record: DamagePreviewRecord, current?: Revi
       reason: { code: "DAMAGE_PREVIEW_PLANNED_RECOVERY_PAUSE", message: "Recovery finishes its admitted command and durable checkpoint, then pauses for this preview. This planned pause does not start the contention grace period." },
     } : null,
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
-    artifacts: record.artifacts.map(({ path: _path, ...artifact }) => artifact),
+    artifacts: record.artifacts.map(({ path: _path, ...artifact }, index) => ({ ...artifact, media: files[index]!.media })),
+    media,
+    finishedOutputInspection: null as DamagePreviewFinishedOutputInspection | null,
     provenance: { preflightToken: record.preflightToken, ...review.reviewedRequest, clips: review.clips, commands: record.commands, streamMapping: record.streamMapping, toolVersions: record.toolVersions, deviations: record.deviations },
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     warning: "A sample illustrates decoding at the recorded interval. Failed, empty or partial media never means no damage.",
@@ -98,28 +105,34 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
 }
-export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
-  const record = requiredRecord(access, id);
-  const saved = (JSON.parse(record.reviewJson) as Review).reviewedRequest!.checkpoint!;
+export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord, mediaTargets?: ReturnType<typeof previewMediaTargets>, includeOutputInspection = false, outputInspection?: DamagePreviewFinishedOutputInspection | null) {
+  const original = JSON.parse(record.reviewJson) as Review;
+  const saved = original.reviewedRequest!.checkpoint!;
   const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, parseDamagePreviewInput(JSON.parse(record.selectionJson)), {
     id: saved.manifestId, revision: saved.manifestRevision, manifestDigest: saved.manifestDigest, publicationDigest: saved.publicationDigest!,
   }));
-  const originalTitle = (JSON.parse(record.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId;
+  const originalTitle = original.reviewedRequest?.title?.titleIdentityId;
   const history = access.damagePreviews.list(record.originalDiscArchiveId);
   const newerIntent = history.slice(history.findIndex((candidate) => candidate.id === record.id) + 1).filter((candidate) =>
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
-  return presentDamagePreview(record, current, newerIntent !== undefined && previewInputIdentity(JSON.parse(newerIntent.reviewJson) as Review) !== previewInputIdentity(JSON.parse(record.reviewJson) as Review));
+  const superseded = newerIntent !== undefined && previewMediaInputs(JSON.parse(newerIntent.reviewJson) as Review) !== previewMediaInputs(original);
+  const outdated = superseded || previewMediaInputs(current) !== previewMediaInputs(original);
+  const finishedOutputInspection = outputInspection === undefined ? inspectDamagePreviewOutputAcknowledgements(access, record) : outputInspection;
+  return { ...presentDamagePreview(record, { outdated, retention: damagePreviewRetention(access, record, outdated, finishedOutputInspection), mediaTargets }), finishedOutputInspection: includeOutputInspection ? finishedOutputInspection : null };
+}
+export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
+  return describeDamagePreview(access, requiredRecord(access, id), undefined, true);
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {
-  return presentDamagePreview(access.damagePreviews.cancel(id, parseMutationKey(mutationKey)));
+  return access.damagePreviews.cancel(id, parseMutationKey(mutationKey), presentDamagePreview);
 }
-export async function waitDamagePreview(access: DataAccess, id: string, options: { timeoutMs: number; pollMs?: number }, ownership?: ArchiveImageOwnership) {
+export async function waitDamagePreview(access: DataAccess, id: string, options: { timeoutMs: number; pollMs?: number }, _ownership?: ArchiveImageOwnership) {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 || options.timeoutMs > 3_600_000 || (options.pollMs !== undefined && (!Number.isSafeInteger(options.pollMs) || options.pollMs < 100 || options.pollMs > 5_000))) throw new InvalidDamagePreviewInputError("Invalid Damage Preview wait duration.");
   const deadline = Date.now() + options.timeoutMs;
   while (true) {
     const record = requiredRecord(access, id);
     const terminal = !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status);
-    if (terminal || Date.now() >= deadline) return { ...await inspectDamagePreview(access, id, ownership), wait: { terminal, timedOut: !terminal } };
+    if (terminal || Date.now() >= deadline) return { ...describeDamagePreview(access, record), wait: { terminal, timedOut: !terminal } };
     await delay(Math.min(options.pollMs ?? 500, Math.max(0, deadline - Date.now())));
   }
 }
@@ -129,6 +142,8 @@ export function damagePreviewArtifact(access: DataAccess, identity: string) {
   const record = requiredRecord(access, match[1]!);
   const artifact = record.artifacts.find((item) => item.identity === identity);
   if (!artifact) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", [{ code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", message: "This request has no retained canonical media with that identity." }]);
+  const state = damagePreviewMediaState(record).files[record.artifacts.indexOf(artifact)]!;
+  if (state.media.reasonCode) throw new DamagePreviewRejectedError(state.media.reasonCode, [{ code: state.media.reasonCode, message: "Canonical media is absent or unavailable. Original provenance and generation results remain in request inspection." }], describeDamagePreview(access, record));
   return { record, artifact };
 }
 export async function openDamagePreviewArtifact(access: DataAccess, identity: string) {
@@ -140,10 +155,15 @@ export async function openDamagePreviewArtifact(access: DataAccess, identity: st
     const hash = createHash("sha256");
     for await (const chunk of file.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
     if (hash.digest("hex") !== artifact.sha256) throw new Error("Preview media identity changed.");
+    if (!access.damagePreviews.touchMedia(record.id, identity)) {
+      const current = describeDamagePreview(access, requiredRecord(access, record.id));
+      const code = current.artifacts.find((item) => item.identity === identity)?.media.reasonCode ?? "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE";
+      throw new DamagePreviewRejectedError(code, [{ code, message: "Media removal won the access race. Inspect the retained request history." }], current);
+    }
     return { file, record, artifact };
   } catch (error) { await file.close(); throw error; }
 }
-export async function exportDamagePreview(access: DataAccess, identity: string, destination: string, ownership?: ArchiveImageOwnership) {
+export async function exportDamagePreview(access: DataAccess, identity: string, destination: string, _ownership?: ArchiveImageOwnership) {
   if (!isAbsolute(destination) || destination.includes("\0")) throw new InvalidDamagePreviewInputError("Choose an absolute destination on the executing host.");
   const { file, record, artifact } = await openDamagePreviewArtifact(access, identity);
   const target = resolve(destination);
@@ -166,7 +186,7 @@ export async function exportDamagePreview(access: DataAccess, identity: string, 
       if ((await output.stat()).size !== artifact.sizeBytes) throw new Error("Canonical export was not written completely.");
       await output.sync();
     } finally { await output.close(); }
-    const preview = await inspectDamagePreview(access, record.id, ownership);
+    const preview = describeDamagePreview(access, requiredRecord(access, record.id));
     await link(temporary, target);
     return { artifactIdentity: identity, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, path: target, preview };
   } finally { await file.close(); await unlink(temporary).catch(() => undefined); }

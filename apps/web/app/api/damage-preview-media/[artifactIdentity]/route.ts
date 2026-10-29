@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { inspectDamagePreview, openDamagePreviewArtifact, InvalidDamagePreviewInputError, DamagePreviewRejectedError } from "@rip-dvd/application";
+import { describeDamagePreview, openDamagePreviewArtifact, InvalidDamagePreviewInputError, DamagePreviewRejectedError } from "@rip-dvd/application";
 import { RecordNotFoundError, type DataAccess } from "@rip-dvd/data-access";
 import { getDataAccess } from "../../../../lib/data-access";
 
@@ -13,7 +13,7 @@ export async function createDamagePreviewMediaRoute(request: Request, identity: 
     const access = getAccess();
     const { file, artifact, record } = await openDamagePreviewArtifact(access, identity);
     let inspection;
-    try { inspection = await inspectDamagePreview(access, record.id); }
+    try { inspection = describeDamagePreview(access, record); }
     catch (error) { await file.close(); throw error; }
     const stream = file.createReadStream({ start: 0, autoClose: true });
     return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, { headers: {
@@ -25,7 +25,7 @@ export async function createDamagePreviewMediaRoute(request: Request, identity: 
     } });
   } catch (error) {
     const status = error instanceof InvalidDamagePreviewInputError ? 400 : error instanceof RecordNotFoundError || error instanceof DamagePreviewRejectedError ? 404 : 503;
-    return Response.json({ error: { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" } }, { status, headers: { "Cache-Control": "no-store" } });
+    return Response.json({ error: error instanceof DamagePreviewRejectedError ? { code: error.code, message: error.message, reasons: error.reasons, current: error.current } : { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE" } }, { status, headers: { "Cache-Control": "no-store" } });
   }
 }
 export async function GET(request: Request, context: { params: Promise<{ artifactIdentity: string }> }) { return createDamagePreviewMediaRoute(request, (await context.params).artifactIdentity); }

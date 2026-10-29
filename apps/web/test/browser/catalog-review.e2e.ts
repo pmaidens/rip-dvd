@@ -906,7 +906,7 @@ function pageLabel(variant: "desktop" | "mobile"): string {
 test("Damage Preview requests, waits for and cancels reviewed work with visible provenance", async ({ page }, testInfo) => {
   let cancelled = false;
   const requestId = "11111111-2222-4333-8444-555555555555";
-  const state = () => ({ schemaVersion: 1, id: requestId, status: cancelled ? "cancelled" : "queued", generationStatus: cancelled ? "cancelled" : "queued", outdated: false, outdatedReasons: [], reason: null, cancellationRequested: cancelled, progress: { completedClips: 0, totalClips: 1, percent: null }, artifacts: [], provenance: { checkpoint: { manifestRevision: 1 } }, warning: "Failed, empty or partial media never means no damage." });
+  const state = () => ({ schemaVersion: 1, id: requestId, status: cancelled ? "cancelled" : "queued", generationStatus: cancelled ? "cancelled" : "queued", outdated: false, outdatedReasons: [], reason: null, cancellationRequested: cancelled, progress: { completedClips: 0, totalClips: 1, percent: null }, artifacts: [], media: { state: "not_generated", token: "synthetic-media-token", retention: null, removal: null, deletion: { available: false, reasons: [] }, cleanup: { available: false, reasons: [] } }, provenance: { checkpoint: { manifestRevision: 1 } }, warning: "Failed, empty or partial media never means no damage." });
   await page.route("**/api/damage-previews/*/availability", async (route) => {
     // Node requests do not inherit Chromium's test-host resolver rule.
     const response = await fetchFromBrowserServer(route);
@@ -933,6 +933,50 @@ test("Damage Preview requests, waits for and cancels reviewed work with visible 
   await preview.getByRole("button", { name: "Cancel preview request" }).click();
   await expect(preview.getByText(/Status: cancelled/)).toBeVisible();
   await expect(preview.getByText("Failed, empty or partial media never means no damage.")).toBeVisible();
+  await preview.getByText("Preview provenance").click();
+  await expect(preview.locator("pre")).toContainText('"manifestRevision": 1');
+});
+
+
+test("Damage Preview media deletion keeps provenance and coverage visible", async ({ page }, testInfo) => {
+  const requestId = "11111111-2222-4333-8444-666666666666";
+  let requested = false;
+  let deleted = false;
+  const state = () => ({
+    schemaVersion: 1, id: requestId, status: "partial", generationStatus: "partial", outdated: false, outdatedReasons: [],
+    reason: { code: "SYNTHETIC_INTERRUPTION", message: "Generation was interrupted." }, progress: { completedClips: 1, totalClips: 2, percent: null },
+    media: { state: deleted ? "removed" : requested ? "removing" : "retained", token: deleted ? "synthetic-removed-token" : "synthetic-retained-token", retention: null,
+      removal: requested ? { requestId: "synthetic-removal-request", cause: "explicit_deletion", state: deleted ? "complete" : "pending" } : null, deletion: { available: !requested, reasons: [] } },
+    artifacts: [{ identity: `damage-preview-v1.${requestId}.0`, sizeBytes: 128, coverage: { startMilliseconds: 1000, endMilliseconds: 6000 },
+      media: { state: deleted ? "removed" : requested ? "removing" : "retained", reasonCode: deleted ? "DAMAGE_PREVIEW_MEDIA_DELETED" : requested ? "DAMAGE_PREVIEW_MEDIA_REMOVING" : null } }],
+    provenance: { checkpoint: { manifestRevision: 1 }, streams: { audio: [128], subtitles: [] } },
+    warning: "Partial media never means no damage.",
+  });
+  await page.route(/\/api\/damage-previews\/[^/]+(?:\/media)?$/, async (route) => {
+    if (route.request().method() === "DELETE") {
+      expect(route.request().postDataJSON()).toMatchObject({ mediaToken: "synthetic-retained-token", mutationKey: expect.any(String) });
+      requested = true;
+      await route.fulfill({ status: 202, json: state() });
+      return;
+    }
+    if (requested) deleted = true;
+    await route.fulfill({ json: state() });
+  });
+  await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
+  await page.getByRole("tab", { name: "Damage decision" }).click();
+  const preview = page.getByRole("region", { name: "Damage Preview", exact: true });
+  await preview.getByLabel("Damage Preview request identity").fill(requestId);
+  await preview.getByRole("button", { name: "Refresh preview status" }).click();
+  await expect(preview.getByRole("link", { name: /Download canonical MKV/ })).toBeVisible();
+  await preview.getByRole("button", { name: "Delete preview media" }).click();
+  await expect(preview.getByText(/Removal: explicit_deletion, pending/)).toBeVisible();
+  await expect(preview.getByText(/Removal is queued for the Encode worker/)).toBeVisible();
+  await preview.getByRole("button", { name: "Refresh preview status" }).click();
+  await expect(preview.getByText(/Removal: explicit_deletion, complete/)).toBeVisible();
+  await expect(preview.getByRole("link", { name: /Download canonical MKV/ })).toHaveCount(0);
+  await expect(preview.getByText(/Actual coverage: 1 s to 6 s/)).toBeVisible();
+  await expect(preview.getByText(/Generation was interrupted/)).toBeVisible();
+  await expect(preview.getByRole("button", { name: "Delete preview media" })).toBeDisabled();
   await preview.getByText("Preview provenance").click();
   await expect(preview.locator("pre")).toContainText('"manifestRevision": 1');
 });

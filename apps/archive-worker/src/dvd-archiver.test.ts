@@ -485,7 +485,9 @@ async function stopOrphanedWriter(
   process.kill(pid, "SIGKILL");
   orphanedWriterPids.splice(orphanedWriterPids.indexOf(pid), 1);
   await waitFor(
-    ownershipReleased,
+    // Wait for init to reap the fixture before inspecting released ownership.
+    // A dying process can briefly deny even same-user /proc descriptor reads.
+    () => !existsSync(`/proc/${pid}`) && ownershipReleased(),
     "orphaned writer fixture did not release its OS ownership",
   );
 }

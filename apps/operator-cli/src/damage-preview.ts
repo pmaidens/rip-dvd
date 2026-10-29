@@ -8,8 +8,9 @@ export async function runDamagePreview(args: readonly string[], io: StructuredIn
   const allowed: Record<string, string[]> = {
     availability: ["--json", "--stdin", "--file"], request: ["--json", "--stdin", "--file", "--key"],
     inspect: [], wait: ["--timeout-ms", "--poll-ms"], cancel: ["--key"], export: ["--destination"],
+    delete: ["--json", "--stdin", "--file", "--key"], cleanup: ["--json", "--stdin", "--file", "--key"],
   };
-  if (!action || !id || !Object.hasOwn(allowed, action)) throw new CommandFailure("INVALID_ARGUMENTS", "Expected damage-preview availability|request|inspect|wait|cancel|export <identity> with the action's inputs.", 2);
+  if (!action || !id || !Object.hasOwn(allowed, action)) throw new CommandFailure("INVALID_ARGUMENTS", "Expected damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup <identity> with the action's inputs.", 2);
   const options = new Map<string, string>();
   for (let index = 0; index < tail.length; index++) {
     const key = tail[index]!;
@@ -28,6 +29,8 @@ export async function runDamagePreview(args: readonly string[], io: StructuredIn
       case "inspect": return await operations.inspectDamagePreview(id);
       case "wait": return await operations.waitDamagePreview(id, { timeoutMs: Number(options.get("--timeout-ms")), ...(options.has("--poll-ms") ? { pollMs: Number(options.get("--poll-ms")) } : {}) });
       case "cancel": return operations.cancelDamagePreview(id, options.get("--key"));
+      case "delete": return operations.deleteDamagePreviewMedia(id, { ...(input as Record<string, unknown> | undefined), mutationKey: options.get("--key") });
+      case "cleanup": return operations.cleanupDamagePreviewMedia(id, { ...(input as Record<string, unknown> | undefined), mutationKey: options.get("--key") });
       case "export": {
         const destination = options.get("--destination");
         if (!destination) throw new InvalidDamagePreviewInputError("An export destination is required.");

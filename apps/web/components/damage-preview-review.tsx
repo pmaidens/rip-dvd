@@ -16,6 +16,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
   const [availability, setAvailability] = useState<DamagePreviewAvailability | null>(null);
   const [review, setReview] = useState<DamagePreviewAvailability | null>(null);
   const [preview, setPreview] = useState<DamagePreviewInspection | null>(null);
+  const removalKey = useRef<{ token: string; key: string } | null>(null);
   const requestKey = useRef<{ token: string; key: string } | null>(null);
   const cancelKey = useRef<{ id: string; key: string } | null>(null);
   const [requestId, setRequestId] = useState("");
@@ -110,6 +111,24 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Damage Preview could not be inspected."); }
     finally { setBusy(false); }
   }
+  async function deleteMedia() {
+    if (!preview?.media.deletion.available) return;
+    setBusy(true); setError(null);
+    if (removalKey.current?.token !== preview.media.token) removalKey.current = { token: preview.media.token, key: createMutationKey() };
+    try {
+      const response = await fetch(`/api/damage-previews/${encodeURIComponent(preview.id)}/media`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mutationKey: removalKey.current.key, mediaToken: preview.media.token }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        if (result.error?.current) setPreview(result.error.current);
+        throw new Error(result.error?.message ?? "Preview media could not be deleted.");
+      }
+      setPreview(result);
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "Preview media could not be deleted."); }
+    finally { setBusy(false); }
+  }
 
   return (
     <section className="catalog-pane" aria-label="Damage Preview">
@@ -185,8 +204,16 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         {preview.outdatedReasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
         <p>{preview.progress.completedClips} of {preview.progress.totalClips} clips. Progress: {preview.progress.percent === null ? "unknown" : `${preview.progress.percent}%`}.</p>
         <p>{preview.warning}</p>
+        <p>Media: {preview.media.state}. Deletion preserves the request, selections, generation result, coverage and provenance.</p>
+        {preview.media.retention?.protectedForReview ? <p>Current media is protected from routine cleanup while review or finished-output inspection still needs it.</p> : null}
+        {preview.media.retention?.awaitingFinishedOutputInspection ? <p>This sample remains protected until inspection of a related finished output is proved.</p> : null}
+        {preview.finishedOutputInspection?.outputs.some((output) => output.acknowledgementStatus === "acknowledged") ? <p>{preview.finishedOutputInspection.retentionSatisfied ? "An applicable normal output inspection acknowledgement proves the recorded source relationship. Active Catalog Review still protects current media." : "An output inspection acknowledgement is recorded. Its source relationship or passing validation proof is unavailable, so it does not release retention."}</p> : null}
+        {preview.media.removal ? <p>Removal: {preview.media.removal.cause}, {preview.media.removal.state}. Request {preview.media.removal.requestId}.</p> : null}
+        {preview.media.removal?.state === "pending" ? <p>Removal is queued for the Encode worker. Refresh preview status to see completion or failure.</p> : null}
+        <button type="button" disabled={busy || !preview.media.deletion.available} onClick={() => void deleteMedia()}>Delete preview media</button>
+        {preview.media.deletion.reasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
         {preview.artifacts.map((artifact) => <p key={artifact.identity}>
-          <a href={`/api/damage-preview-media/${encodeURIComponent(artifact.identity)}`}>Download canonical MKV, {artifact.sizeBytes} bytes</a>. Actual coverage: {seconds(artifact.coverage.startMilliseconds)} to {seconds(artifact.coverage.endMilliseconds)}. {preview.status}.
+          {artifact.media.state === "retained" ? <a href={`/api/damage-preview-media/${encodeURIComponent(artifact.identity)}`}>Download canonical MKV, {artifact.sizeBytes} bytes</a> : <>Media unavailable: {artifact.media.reasonCode}</>}. Actual coverage: {seconds(artifact.coverage.startMilliseconds)} to {seconds(artifact.coverage.endMilliseconds)}. {preview.status}.
         </p>)}
         <details><summary>Preview provenance</summary><pre>{JSON.stringify(preview.provenance, null, 2)}</pre></details>
       </div> : null}

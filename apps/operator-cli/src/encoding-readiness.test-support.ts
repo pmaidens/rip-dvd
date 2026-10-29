@@ -81,12 +81,13 @@ export async function acceptReadinessContent(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   archiveId: string,
   mainFeatureResolutions: { discSelectionId: string; titleIdentityId: string }[] = [],
+  mutationKey = "synthetic-readiness-acceptance",
 ) {
   const previewResult = await fixture.run(["catalog-review", "preview-damage-acceptance", archiveId,
     "--json", JSON.stringify({ excludedTitleIdentityIds: [], mainFeatureResolutions })]);
   const preview = previewResult.result as import("@rip-dvd/application").DvdTitleDamageAcceptancePreview;
-  if (!preview.available) throw new Error("Synthetic readiness acceptance preflight unavailable");
-  return fixture.run(["catalog-review", "accept-damage", archiveId, "--key", "synthetic-readiness-acceptance", "--json", JSON.stringify({
+  if (!preview.available) throw new Error(`Synthetic readiness acceptance preflight unavailable: ${JSON.stringify(preview)}`);
+  return fixture.run(["catalog-review", "accept-damage", archiveId, "--key", mutationKey, "--json", JSON.stringify({
     operator: "Synthetic readiness operator", previewToken: preview.previewToken,
     checkpointRevision: preview.current!.checkpoint!.revision,
     checkpointDigest: preview.current!.checkpoint!.manifestDigest,
