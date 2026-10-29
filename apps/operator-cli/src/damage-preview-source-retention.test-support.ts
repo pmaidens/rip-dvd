@@ -8,7 +8,7 @@ import { publishSyntheticClaim, syntheticOutputValidation } from "./encode-outpu
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 
 export async function seedProvedPreviewOutput(fixture: ReturnType<typeof createOperatorWorkflowFixture>, options: { differentProfile?: boolean; selectedSubtitle?: boolean } = {}) {
-  const seeded = await seedEncodeClaim(fixture, { clean: true });
+  const seeded = await seedEncodeClaim(fixture, { clean: false });
   try {
     if (options.selectedSubtitle) {
       const db = new DatabaseSync(fixture.databasePath);

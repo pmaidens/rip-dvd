@@ -91,6 +91,7 @@ export async function seedRetainedDamagePreview(fixture: ReturnType<typeof creat
   const seeded = provided ?? await seedDamagePreview(fixture);
   const review = (await fixture.run(["damage-preview", "availability", seeded.archive.id, "--json", JSON.stringify(seeded.input)])).result as { preflightToken: string };
   const requested = await fixture.run(["damage-preview", "request", seeded.archive.id, "--key", "synthetic-retained-request", "--json", JSON.stringify({ selection: seeded.input, preflightToken: review.preflightToken })]);
+  if (requested.exitCode !== 0) throw new Error(`Synthetic Damage Preview admission failed: ${JSON.stringify(requested.result)}`);
   const id = (requested.result as { id: string }).id;
   const access = fixture.openAccess();
   const record = access.damagePreviews.claim("synthetic-retention-worker")!;
