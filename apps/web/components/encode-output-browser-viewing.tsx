@@ -21,27 +21,35 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const submission = useRef<{ mutationKey: string; reviewToken: string } | null>(null);
+  const selectedRequestId = useRef<string | null>(null);
+  const latestRead = useRef(0);
   const storageKey = `encode-output-browser-rendition:${artifactIdentity}`;
   const inspect = async (id: string) => {
-    const result: Rendition = await readResponse(await fetch(`/api/browser-renditions/${encodeURIComponent(id)}`, { cache: "no-store" }));
-    if (result.source.identity !== artifactIdentity) throw new Error("The saved rendition belongs to a different Encode Output.");
-    setRendition(result);
+    if (selectedRequestId.current !== id) return;
+    const sequence = ++latestRead.current;
+    const current = () => selectedRequestId.current === id && latestRead.current === sequence;
+    try {
+      const result: Rendition = await readResponse(await fetch(`/api/browser-renditions/${encodeURIComponent(id)}`, { cache: "no-store" }));
+      if (result.id !== id || result.source.identity !== artifactIdentity) throw new Error("The saved rendition belongs to a different request or Encode Output.");
+      if (current()) setRendition(result);
+    } catch (failure) { if (current()) setError(failure instanceof Error ? failure.message : "Rendition inspection is unavailable."); }
   };
   useEffect(() => {
     const id = sessionStorage.getItem(storageKey);
-    if (id) void fetch(`/api/browser-renditions/${encodeURIComponent(id)}`, { cache: "no-store" }).then(readResponse).then((result: Rendition) => {
-      if (result.source.identity === artifactIdentity) setRendition(result);
-    }).catch((failure: Error) => setError(failure.message));
+    if (id) { selectedRequestId.current = id; void inspect(id); }
   }, [storageKey, artifactIdentity]);
   const activeId = rendition && ["queued", "generating"].includes(rendition.status) ? rendition.id : null;
   useEffect(() => {
     if (!activeId) return;
-    const timer = setInterval(() => {
-      void fetch(`/api/browser-renditions/${encodeURIComponent(activeId)}`, { cache: "no-store" }).then(readResponse)
-        .then((result: Rendition) => setRendition(result)).catch((failure: Error) => setError(failure.message));
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [activeId]);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await inspect(activeId);
+      if (!stopped) timer = setTimeout(() => { void poll(); }, 1500);
+    };
+    timer = setTimeout(() => { void poll(); }, 1500);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [activeId, artifactIdentity]);
   return <section aria-label="Browser Viewing Rendition">
     <h5>Browser Viewing Rendition</h5>
     <p>Ordinary playback of a finished Encode Output. Source correspondence may be unknown. No damage seek is claimed.</p>
@@ -58,10 +66,10 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
       <p>Audio: {audioInventoryLabel(availability.source.media.streams)}.</p>
       <p>{availability.conversion.subtitles === "omitted" ? "Soft subtitles, including DVD bitmap subtitles, are omitted. No subtitles are burned in." : availability.conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : "No subtitles are present."}</p>
       <button type="button" disabled={busy || !availability.available} onClick={() => {
-        setBusy(true); setError(null);
+        setBusy(true); setError(null); selectedRequestId.current = null; latestRead.current += 1; setRendition(null);
         submission.current ??= { mutationKey: createMutationKey(), reviewToken: availability.reviewToken };
         void fetch(`/api/encode-outputs/${encodeURIComponent(artifactIdentity)}/renditions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(submission.current) })
-          .then(readResponse).then((result: Rendition) => { sessionStorage.setItem(storageKey, result.id); setRendition(result); })
+          .then(readResponse).then((result: Rendition) => { sessionStorage.setItem(storageKey, result.id); selectedRequestId.current = result.id; setRendition(result); })
           .catch((failure: Error) => setError(failure.message)).finally(() => setBusy(false));
       }}>Create browser rendition</button>
     </> : null}
@@ -71,7 +79,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
       <p>Audio: {audioInventoryLabel(rendition.source.media.streams)}.</p>
       <p>Stream-copy remux to MP4. {rendition.conversion.subtitles === "omitted" ? "Soft subtitles omitted; none burned in." : rendition.conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : "No subtitles."}</p>
       {rendition.reason ? <p role="alert">{rendition.reason.message} [{rendition.reason.code}]</p> : null}
-      <button type="button" onClick={() => { setError(null); void inspect(rendition.id).catch((failure: Error) => setError(failure.message)); }}>Refresh rendition status</button>
+      <button type="button" onClick={() => { setError(null); void inspect(rendition.id); }}>Refresh rendition status</button>
       {rendition.media?.availability?.available === false ? <p role="alert">Rendition media is unavailable. [{rendition.media.availability.reasonCode}]</p> : null}
       {rendition.status === "complete" && rendition.media && rendition.media.availability?.available !== false ? <video aria-label="Finished Encode Output browser rendition" controls playsInline preload="metadata" src={`/api/browser-renditions/${encodeURIComponent(rendition.id)}/media`} style={{ width: "100%", maxWidth: "60rem" }} onError={() => setError("The browser could not play this rendition. Its source validation status is unchanged.")} /> : null}
     </> : null}

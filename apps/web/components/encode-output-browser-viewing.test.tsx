@@ -51,3 +51,29 @@ it("keeps a failed probe's stream inventory unknown instead of claiming audio or
     expect(container.textContent).not.toContain("Audio: none"); expect(container.textContent).not.toContain("No subtitles are present");
   } finally { await act(async () => root.unmount()); }
 });
+it("keeps a newly admitted request selected when an older restoration response arrives late", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  sessionStorage.setItem("encode-output-browser-rendition:synthetic-artifact", "earlier-request");
+  let restore: (response: Response) => void = () => { throw new Error("Restore not started"); };
+  const pendingRestore = new Promise<Response>((resolve) => { restore = resolve; });
+  const source = { identity: "synthetic-artifact", state: "published", file: { mutationRevision: "synthetic-file" }, media: { streams: [] } };
+  const result = (id: string) => ({ id, status: "complete", progress: { percent: 100 }, source, sourceAuthorityRevision: "synthetic-authority", conversion: { subtitles: "none" }, reason: null, media: { identity: `synthetic-media-${id}` } });
+  vi.stubGlobal("fetch", async (url: string, options?: { method?: string }) => {
+    if (url.endsWith("/earlier-request")) return pendingRestore;
+    if (options?.method === "POST") return Response.json(result("new-request"));
+    return Response.json({ available: true, reasons: [], reviewToken: "synthetic-reviewed-token", source, conversion: { subtitles: "none" } });
+  });
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<EncodeOutputBrowserViewing artifactIdentity="synthetic-artifact" validationFailed={false} sourceAuthorityRevision="synthetic-authority" sourceFileMutationRevision="synthetic-file" />));
+    const button = (label: string) => [...container.querySelectorAll("button")].find((element) => element.textContent === label)!;
+    await act(async () => button("Check browser playback").click());
+    await act(async () => button("Create browser rendition").click());
+    expect(container.querySelector("video")?.getAttribute("src")).toBe("/api/browser-renditions/new-request/media");
+    await act(async () => restore(Response.json(result("earlier-request"))));
+    expect(container.querySelector("video")?.getAttribute("src")).toBe("/api/browser-renditions/new-request/media");
+    expect(container.textContent).toContain("Rendition new-request: complete");
+    expect(container.textContent).not.toContain("Rendition earlier-request");
+  } finally { await act(async () => root.unmount()); }
+});
