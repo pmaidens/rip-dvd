@@ -1150,3 +1150,5 @@ export { InvalidEncodeOutputIntervalInputError } from "./encode-output-correspon
 export type { EncodeOutputIntervalInspection } from "./encode-output-correspondence.js";
 export { previewEncodeOutputKeep, InvalidEncodeOutputKeepPreflightInputError } from "./encode-output-keep-preflight.js";
 export type { EncodeOutputKeepPreflight } from "./encode-output-keep-preflight.js";
+export { measureEncodeSourceCell, measureEncodeOutputCell } from "./encode-output-cell-correspondence.js";
+export type { EncodeSourceCellMeasurement, CorrespondenceMediaTool } from "./encode-output-cell-correspondence.js";

@@ -30,11 +30,15 @@ export async function seedCommittedArchiveEvidence(
   ranges: readonly DvdUnrecoveredSourceRange[] = [],
   corrected = false,
   withRecovery = false,
+  imageContents?: Uint8Array,
 ) {
   const { archive } = seedCatalogReviewForReadFixture(fixture);
   const archivePath = join(realpathSync(fixture.originalsLibraryPath), `${archive.id}.iso`);
   const acceptedSectors = 1024;
-  writeFileSync(archivePath, Buffer.alloc(acceptedSectors * 2048));
+  const image = Buffer.alloc(acceptedSectors * 2048);
+  if (imageContents && imageContents.byteLength > image.byteLength) throw new Error("Synthetic image exceeds its accepted extent");
+  if (imageContents) image.set(imageContents);
+  writeFileSync(archivePath, image);
   utimesSync(archivePath, 1_700_000_000, 1_700_000_000);
   const sqlite = new DatabaseSync(fixture.databasePath);
   sqlite.prepare(`UPDATE original_disc_archives SET archive_path = ?, size_bytes = ?,

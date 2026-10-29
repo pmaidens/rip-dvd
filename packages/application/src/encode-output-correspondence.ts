@@ -1,5 +1,6 @@
 import { canonicalPublicationJson, type DataAccess } from "@rip-dvd/data-access";
-import { inspectEncodeOutput, type EncodeOutputInspection, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
+import { hashEncodeOutputBytes } from "./encode-output-cell-correspondence.js";
+import { inspectEncodeOutput, probeEncodeOutputMedia, type EncodeOutputInspection, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
 
 export class InvalidEncodeOutputIntervalInputError extends Error {
   constructor() {
@@ -36,9 +37,9 @@ type RecordedInterval = NonNullable<SourceInterval>["intervals"][number];
 
 interface IntervalClassification {
   intervalIndex: number;
-  status: "absent" | "unknown";
+  status: "verified" | "absent" | "unknown";
   sourceInterval: RecordedInterval | null;
-  outputInterval: null;
+  outputInterval: { startMilliseconds: number; endMilliseconds: number } | null;
   reasonCode: string;
   reason: string;
   evidence: {
@@ -49,6 +50,7 @@ interface IntervalClassification {
     inspectionReasonCode: string | null;
     requestedMapping: SourceSnapshot["source"]["assessment"]["items"][number] | null;
     selectedMapping: SourceSnapshot["source"]["assessment"]["items"][number] | null;
+    measuredCorrespondence: NonNullable<EncodeOutputInspection["artifact"]["validation"]["checks"]>["correspondence"] | null;
   };
 }
 
@@ -74,6 +76,7 @@ function classifyInterval(
       inspectionReasonCode: artifact.inspectability.reasonCode,
       requestedMapping: requested ?? null,
       selectedMapping: selected ?? null,
+      measuredCorrespondence: artifact.validation.checks?.correspondence ?? null,
     },
   };
   const unknown = (reasonCode: string, reason: string): IntervalClassification => ({ ...base, status: "unknown", reasonCode, reason });
@@ -106,6 +109,39 @@ function classifyInterval(
     return { ...base, status: "absent", reasonCode: "SOURCE_EXCLUDED_BY_SELECTION",
       reason: "The complete requested playback source map is disjoint from the complete source map of the output's concrete playback selection." };
   }
+  const measured = artifact.validation.checks?.correspondence;
+  if (measured?.status === "measured") {
+    const { outputInterval, sourceVideo, outputVideo, sourceRange } = measured;
+    const span = selected.timingEvidence?.occurrences.find((occurrence) => occurrence.playbackOccurrence === interval.playbackOccurrence)
+      ?.spans.find((candidate) => candidate.coverage === "whole_cell" &&
+        candidate.sourceRange.startLba === sourceRange.startLba && candidate.sourceRange.sectorCount === sourceRange.sectorCount &&
+        candidate.startMilliseconds === interval.startMilliseconds && candidate.endMilliseconds === interval.endMilliseconds);
+    const same = (left: unknown, right: unknown) => canonicalPublicationJson(left) === canonicalPublicationJson(right);
+    if (measured.policyVersion !== "encode-output-exact-cell-video-v1" ||
+        measured.claimSnapshotId !== snapshot!.id || measured.assessmentIdentity !== assessment.id ||
+        measured.titleIdentityObservationId !== source.titleIdentity.id ||
+        !same(measured.checkpoint, source.checkpoint) || !same(measured.resolvedSource, source.resolvedSource) ||
+        measured.outputFileIdentity !== artifact.file.identity || !("sha256" in artifact.media) || measured.outputBytesSha256 !== artifact.media.sha256 ||
+        !/^[a-f0-9]{64}$/.test(measured.sourceBytesSha256) || !/^[a-f0-9]{64}$/.test(sourceVideo.sequenceSha256) ||
+        sourceVideo.sequenceSha256 !== outputVideo.sequenceSha256 || sourceVideo.frameCount < 1 ||
+        sourceVideo.frameCount !== outputVideo.frameCount || sourceVideo.width !== outputVideo.width || sourceVideo.height !== outputVideo.height ||
+        !Number.isFinite(outputInterval.startMilliseconds) || !Number.isFinite(outputInterval.endMilliseconds) ||
+        outputInterval.startMilliseconds < 0 || outputInterval.endMilliseconds <= outputInterval.startMilliseconds ||
+        artifact.media.durationSeconds === null || outputInterval.endMilliseconds > artifact.media.durationSeconds * 1000 + 1) {
+      return unknown("OUTPUT_MEASUREMENT_MISMATCH", "Measured correspondence does not match the immutable source claim and actual canonical output bytes.");
+    }
+    if (requested.titleIdentityObservationId === selected.titleIdentityObservationId && interval.coverage === "whole_cell" &&
+        interval.playbackOccurrence === 1 && span && source.resolvedSource.selectedPath.length === 1 &&
+        source.resolvedSource.angleNumber === 1 && source.resolvedSource.chapterStart === 1 && source.resolvedSource.chapterEnd === 1 &&
+        source.title.chapters === 1 && source.titleIdentity.chapterCount === 1 &&
+        same(source.titleIdentity.sourceExtents, [sourceRange])) {
+      return { ...base, status: "verified", outputInterval,
+        reasonCode: "OUTPUT_CELL_CONTENT_VERIFIED",
+        reason: "One complete exact decoded-video match locates the whole selected source cell in this output. The measured envelope retains whole-cell coverage; estimated source timestamps are not output seek points." };
+    }
+  } else if (measured?.status === "unknown" && requested.titleIdentityObservationId === selected.titleIdentityObservationId) {
+    return unknown(measured.reasonCode, "The bounded exact-video measurement could not establish a unique complete selected-cell location in this output.");
+  }
   if (source.resolvedSource.chapterStart !== selected.selection.chapterStart || source.resolvedSource.chapterEnd !== selected.selection.chapterEnd) {
     return unknown("SOURCE_CHAPTER_MAPPING_INCOMPLETE", "The recorded title source map does not locate this interval within the selected chapter bounds.");
   }
@@ -117,16 +153,22 @@ export async function inspectEncodeOutputIntervals(
   access: DataAccess, artifactIdentity: unknown, input: unknown, mediaProbe?: EncodeOutputMediaProbe,
 ) {
   const query = parseQuery(input);
-  const inspection = await inspectEncodeOutput(access, artifactIdentity, mediaProbe);
+  const inspection = await inspectEncodeOutput(access, artifactIdentity, async (path) => {
+    const media = await (mediaProbe ?? probeEncodeOutputMedia)(path);
+    let sha256: string | null = null;
+    try { sha256 = await hashEncodeOutputBytes(path, new AbortController().signal); } catch { /* Ordinary inspection remains available. */ }
+    return { ...media, sha256 };
+  });
   const snapshot: SourceSnapshot | null = inspection.artifact.provenance.sourceSnapshot;
   const intervals = query.intervalIndexes.map((index) => classifyInterval(inspection, snapshot, query, index));
   const unknown = intervals.some((interval) => interval.status === "unknown");
+  const verified = intervals.every((interval) => interval.status === "verified");
   return {
     schemaVersion: 1 as const, query, inspection, intervals,
-    targetedLocation: { eligible: false as const,
-      reasonCode: unknown ? "OUTPUT_MAPPING_UNKNOWN" as const : "SOURCE_EXCLUDED_BY_SELECTION" as const,
-      reason: unknown ? "No verified output location is available for these source intervals."
-        : "The requested source intervals are excluded by the output's concrete playback selection." },
+    targetedLocation: { eligible: verified,
+      reasonCode: verified ? null : unknown ? "OUTPUT_MAPPING_UNKNOWN" as const : "SOURCE_EXCLUDED_BY_SELECTION" as const,
+      reason: verified ? null : unknown ? "No verified output location is available for all requested source intervals."
+        : "One or more requested source intervals are excluded by the output's concrete playback selection." },
   };
 }
 

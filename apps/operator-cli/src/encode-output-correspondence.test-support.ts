@@ -9,16 +9,18 @@ import type { createOperatorWorkflowFixture } from "./operator-workflow.test-sup
 
 /** Two recorded playback paths. The selected path uses sectors 0..99; the
  * omitted path uses sectors 200..299, including the unresolved sector 210. */
-export async function seedCorrespondenceClaim(
+export async function seedCorrespondenceSource(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  options: { chapters?: boolean; partialOmittedMap?: boolean; sharedSource?: boolean; overlappingPath?: boolean } = {},
+  options: { chapters?: boolean; partialOmittedMap?: boolean; sharedSource?: boolean; overlappingPath?: boolean;
+    singleCell?: { imageContents: Uint8Array } } = {},
 ) {
   const omittedRange = { startLba: options.sharedSource ? 0 : options.overlappingPath ? 50 : 200,
     sectorCount: options.overlappingPath ? 250 : 100 };
   const evidence = await seedCommittedArchiveEvidence(fixture, [
     { startLba: options.sharedSource ? 10 : 210, sectorCount: 1, classification: "skipped_untested" },
-  ], false, true);
-  const seeded = await seedDamagePreview(fixture, "source_span", [[1000, 5000]], { evidence,
+  ], false, true, options.singleCell?.imageContents);
+  const seeded = await seedDamagePreview(fixture, "source_span", [[1000, 5000]], { evidence, singleChapter: options.singleCell !== undefined,
+    ...(options.singleCell ? { sourceSectorCount: Math.max(1, Math.ceil(options.singleCell.imageContents.byteLength / 2048)) } : {}),
     additionalTitleObservations: [{ displayTitleNumber: 2,
       navigation: { videoTitleSetNumber: 2, titleSetTitleNumber: 1, programChainNumber: 1 },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 2, cellId: 1 }],
@@ -34,7 +36,8 @@ export async function seedCorrespondenceClaim(
       originalDiscArchiveId: seeded.archive.id,
       catalogRevision: access.catalog.listOriginalDiscArchives({ ids: [seeded.archive.id] })[0]!.updatedAt,
       mediaItemId: active.mediaItemId,
-      sourceIdentity: options.chapters ? { kind: "dvd_chapters", titleNumber: 1, chapterStart: 2, chapterEnd: 3 }
+      sourceIdentity: options.singleCell ? { kind: "dvd_chapters", titleNumber: 1, chapterStart: 1, chapterEnd: 1 }
+        : options.chapters ? { kind: "dvd_chapters", titleNumber: 1, chapterStart: 2, chapterEnd: 3 }
         : { kind: "dvd_title", titleNumber: 1 },
       reason: "Select a synthetic concrete playback path.",
     });
@@ -51,7 +54,7 @@ export async function seedCorrespondenceClaim(
           unknownReasons: omitted && options.partialOmittedMap ? [{ code: "SYNTHETIC_PARTIAL_MAP", message: "Synthetic incomplete omitted path map." }] : [] },
         timingEvidence: { policyVersion: "dvd-title-damage-timing-v1" as const,
           occurrences: [{ playbackOccurrence: 1, spans: [{ sourceRange: { ...sourceRange },
-            startMilliseconds: 1000, endMilliseconds: 5000, timingMethod: "synthetic-source-time-v1", coverage: options.overlappingPath ? "whole_cell" as const : "source_span" as const }], unknownReasons: [] }],
+            startMilliseconds: 1000, endMilliseconds: 5000, timingMethod: "synthetic-source-time-v1", coverage: options.overlappingPath || options.singleCell ? "whole_cell" as const : "source_span" as const }], unknownReasons: [] }],
         },
       };
     })))!;
@@ -77,11 +80,21 @@ export async function seedCorrespondenceClaim(
       mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath,
       expectedSourceDecision: readiness.selections[0]!.expectedSourceDecision, mutationKey: "synthetic-correspondence-enqueue",
     });
-    const claim = (await claimNextEncodeJob(access, "synthetic-correspondence-worker", fixture.originalsLibraryPath, ownership))!;
-    if (claim?.id !== job.id) throw new Error("Synthetic correspondence output was not claimed");
-    return { access, claim, assessment, selection, archive: seeded.archive,
+    return { access, job, assessment, selection, archive: seeded.archive,
       omitted: review.items.find((item) => item.observation.displayTitleNumber === 2)!.observation };
   } catch (error) { access.close(); throw error; }
+}
+
+export async function seedCorrespondenceClaim(
+  fixture: ReturnType<typeof createOperatorWorkflowFixture>,
+  options: Parameters<typeof seedCorrespondenceSource>[1] = {},
+) {
+  const seeded = await seedCorrespondenceSource(fixture, options);
+  try {
+    const claim = (await claimNextEncodeJob(seeded.access, "synthetic-correspondence-worker", fixture.originalsLibraryPath))!;
+    if (claim?.id !== seeded.job.id) throw new Error("Synthetic correspondence output was not claimed");
+    return { ...seeded, claim };
+  } catch (error) { seeded.access.close(); throw error; }
 }
 
 export async function publishCorrespondenceOutput(

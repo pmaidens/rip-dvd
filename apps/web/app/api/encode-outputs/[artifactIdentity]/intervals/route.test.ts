@@ -1,4 +1,5 @@
 import { publishCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-correspondence.test-support.js";
+import { publishMeasuredCorrespondenceOutput } from "../../../../../../operator-cli/src/encode-output-measured-correspondence.test-support.js";
 import { afterEach, expect, it } from "vitest";
 import { encodeOutputArtifactIdentity } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -7,6 +8,26 @@ import { createEncodeOutputIntervalsRoute } from "./route";
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const probe = async () => ({ durationSeconds: 90, streams: [] });
+
+it.each([
+  [{}, "verified", "OUTPUT_CELL_CONTENT_VERIFIED"],
+  [{ outputFrames: ["a", "b", "c", "a", "b", "c"] }, "unknown", "OUTPUT_CONTENT_AMBIGUOUS"],
+  [{ outputFrames: ["a", "c"] }, "unknown", "OUTPUT_CONTENT_UNRESOLVED"],
+  [{ decoderFailure: true }, "unknown", "OUTPUT_MEASUREMENT_FAILED"],
+] as const)("shares generation-bound measured correspondence with the public CLI, %j", async (options, status, reasonCode) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishMeasuredCorrespondenceOutput(fixture, options);
+  try {
+    const response = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${seeded.artifactIdentity}/intervals?query=${encodeURIComponent(JSON.stringify(seeded.query))}`),
+      seeded.artifactIdentity, () => seeded.access, probe);
+    const cli = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+      undefined, undefined, { encodeOutputMediaProbe: probe });
+    expect(response.status).toBe(200);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.result).toEqual(await response.json());
+    expect(cli.result).toMatchObject({ intervals: [{ status, reasonCode }], targetedLocation: { eligible: status === "verified" } });
+  } finally { seeded.access.close(); }
+});
 
 it.each([false, true])("shares interval classification and failed inspection with the JSON CLI, probe failure %s", async (failure) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
