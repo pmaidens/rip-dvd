@@ -85,5 +85,13 @@ export function createEncodeOutputInspectionReceiptAccess(
         .get(encodeJobId, generationIdentity);
       return row ? JSON.parse(String(row.record)) as EncodeOutputInspectionReceiptRecord : null;
     },
+    listForGeneration(encodeJobId, generationIdentity, requestedLimit) {
+      const limit = Math.max(1, Math.min(100, Math.floor(requestedLimit)));
+      const receipts = sqlite.prepare(`SELECT record FROM encode_output_inspection_receipts
+        WHERE encode_job_id = ? AND generation_identity = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+        .all(encodeJobId, generationIdentity, limit + 1)
+        .map((row) => JSON.parse(String(row.record)) as EncodeOutputInspectionReceiptRecord);
+      return { receipts: receipts.slice(0, limit), truncated: receipts.length > limit };
+    },
   };
 }

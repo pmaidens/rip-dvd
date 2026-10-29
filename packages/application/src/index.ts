@@ -3,6 +3,7 @@ import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js"
 import { previewEncodeOutputKeep } from "./encode-output-keep-preflight.js";
 import { keepFailedEncodeOutput } from "./encode-output-keep.js";
 import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
+import { removeDamagePreviewMedia } from "./damage-preview-media-removal.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
 import { inspectArchiveRecoveryRanges } from "./archive-recovery-ranges.js";
@@ -454,6 +455,8 @@ export function createApplicationOperations(
     inspectDamagePreview: (id: string) => inspectDamagePreview(access, id, dependencies.archiveImageOwnership),
     waitDamagePreview: (id: string, options: { timeoutMs: number; pollMs?: number }) => waitDamagePreview(access, id, options, dependencies.archiveImageOwnership),
     cancelDamagePreview: (id: string, key: unknown) => cancelDamagePreview(access, id, key),
+    deleteDamagePreviewMedia: (id: string, input: unknown) => removeDamagePreviewMedia(access, id, input, "explicit_deletion"),
+    cleanupDamagePreviewMedia: (id: string, input: unknown) => removeDamagePreviewMedia(access, id, input, "idle_cleanup"),
     exportDamagePreview: (identity: string, destination: string) => exportDamagePreview(access, identity, destination, dependencies.archiveImageOwnership),
     inspectDamagePreviewAvailability: (archiveId: string, input?: unknown) =>
       inspectDamagePreviewAvailability(access, archiveId, input, dependencies.archiveImageOwnership),
@@ -1138,6 +1141,7 @@ export {
 } from "./catalog-title-damage.js";
 
 export * from "./damage-preview-operations.js";
+export { cleanupDamagePreviewMedia } from "./damage-preview-media-removal.js";
 
 export { reviewDamagePreviewEvidence } from "./damage-preview.js";
 
