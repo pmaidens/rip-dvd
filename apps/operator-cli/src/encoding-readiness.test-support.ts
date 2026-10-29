@@ -86,7 +86,7 @@ export async function acceptReadinessContent(
   const previewResult = await fixture.run(["catalog-review", "preview-damage-acceptance", archiveId,
     "--json", JSON.stringify({ excludedTitleIdentityIds: [], mainFeatureResolutions })]);
   const preview = previewResult.result as import("@rip-dvd/application").DvdTitleDamageAcceptancePreview;
-  if (!preview.available) throw new Error("Synthetic readiness acceptance preflight unavailable");
+  if (!preview.available) throw new Error(`Synthetic readiness acceptance preflight unavailable: ${JSON.stringify(preview)}`);
   return fixture.run(["catalog-review", "accept-damage", archiveId, "--key", mutationKey, "--json", JSON.stringify({
     operator: "Synthetic readiness operator", previewToken: preview.previewToken,
     checkpointRevision: preview.current!.checkpoint!.revision,
