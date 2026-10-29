@@ -71,15 +71,26 @@ linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as con
     // The separate real worker test proves the production preset can reach it.
     // Author deterministic output timestamps even when the DVD's decoded
     // source frames have no PTS. These are fixture construction instructions.
-    const normalized = "[0:v]settb=1/1000,setpts=N*40";
+    // FFmpeg 7 setpts clears frame rate and duration. Restore them before
+    // padding and at the encoder boundary; retain the fine offset in packets.
+    const normalized = "[0:v]setpts=N/(25*TB),fps=25";
     const content = kind === "shifted" || kind === "shifted_pts" ? `${normalized},tpad=start=25:color=red[authored]`
       : kind === "repeated" ? `${normalized},split[a][b];[a][b]concat=n=2:v=1:a=0[authored]`
-      : kind === "omitted" ? `${normalized},select='lt(t,1)+gte(t,2)',setpts=N*40[authored]`
-      : `${normalized},trim=end_frame=50,setpts=N*40[authored]`;
-    const filter = `${content};[authored]fps=25,settb=1/1000,setpts=N*40${kind === "shifted_pts" ? "+21" : ""}[v]`;
+      : kind === "omitted" ? `${normalized},select='lt(t,1)+gte(t,2)',setpts=N/(25*TB)[authored]`
+      : `${normalized},trim=end_frame=50,setpts=N/(25*TB)[authored]`;
+    const filter = `${content};[authored]fps=25[v]`;
     tool("ffmpeg", ["-v", "error", "-y", "-i", media.path, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
       "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
-      "-fps_mode:v", "passthrough", "-enc_time_base:v", "1:1000", seeded.claim.outputPath]);
+      "-fps_mode:v", "passthrough", "-enc_time_base:v", "1:1000",
+      ...(kind === "shifted_pts" ? ["-bsf:v", "setts=pts=PTS+0.021/TB:dts=DTS+0.021/TB"] : []), seeded.claim.outputPath]);
+    const authored = JSON.parse(tool("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
+      "stream=time_base:frame=pts,duration,pkt_duration", "-of", "json", seeded.claim.outputPath])) as {
+        streams: { time_base: string }[]; frames: { pts: number; duration?: number; pkt_duration?: number }[];
+      };
+    const expectedFrames = kind.startsWith("shifted") ? 125 : kind === "repeated" ? 200 : kind === "omitted" ? 75 : 50;
+    expect(authored.streams).toEqual([{ time_base: "1/1000" }]);
+    expect(authored.frames.map((frame) => [frame.pts, frame.duration ?? frame.pkt_duration]))
+      .toEqual(Array.from({ length: expectedFrames }, (_, index) => [(kind === "shifted_pts" ? 21 : 0) + index * 40, 40]));
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
       archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath,
