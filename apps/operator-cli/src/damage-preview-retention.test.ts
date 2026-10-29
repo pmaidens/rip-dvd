@@ -271,6 +271,24 @@ it.each([false, true])("reconciles prior idle-cleanup unlinks before retaining p
     state: syncAvailable ? "cancelled" : "failed",
     outcomes: [expect.objectContaining({ outcome: syncAvailable ? "already_missing" : "failed" }), expect.objectContaining({ outcome: "retained" })],
   } } });
+  const retained = (await inspect()).artifacts[1]!;
+  expect(retained.media).toEqual({ state: "retained", reasonCode: null });
+  const destination = join(fixture.operatorHostPath, `retained-after-sync-${syncAvailable}.mkv`);
+  expect(await fixture.run(["damage-preview", "export", retained.identity, "--destination", destination])).toMatchObject({ exitCode: 0 });
+  expect(readFileSync(destination)).toEqual(readFileSync(second));
+  expect((await inspect()).media.removal?.state).toBe(syncAvailable ? "cancelled" : "failed");
+  const race = fixture.openAccess();
+  const other = fixture.openAccess();
+  const token = (await inspect()).media.token;
+  const touch = race.damagePreviews.touchMedia.bind(race.damagePreviews);
+  race.damagePreviews.touchMedia = (requestId, artifactIdentity) => {
+    createApplicationOperations(other).deleteDamagePreviewMedia(id, { mutationKey: `synthetic-delete-after-sync-${syncAvailable}`, mediaToken: token });
+    return touch(requestId, artifactIdentity);
+  };
+  try {
+    expect(await fixture.run(["damage-preview", "export", retained.identity, "--destination", `${destination}.pending`], undefined, undefined, { openAccess: () => race })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_REMOVING" } } });
+    expect(existsSync(`${destination}.pending`)).toBe(false);
+  } finally { other.close(); }
 });
 
 it.each(["review", "output"] as const)("preserves remaining media when %s evidence changes during live cleanup", async (change) => {

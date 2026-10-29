@@ -119,8 +119,13 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
       });
     },
     update,
-    touchMedia(id) {
-      return sqlite.prepare("UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND (json_extract(record, '$.mediaRemoval') IS NULL OR json_extract(record, '$.mediaRemoval.state') = 'cancelled') RETURNING id").get(now().toISOString(), id) !== undefined;
+    touchMedia(id, artifactIdentity) {
+      return sqlite.prepare(`UPDATE damage_previews SET record = json_set(record, '$.mediaLastAccessedAt', ?) WHERE id = ? AND (
+        json_extract(record, '$.mediaRemoval') IS NULL OR json_extract(record, '$.mediaRemoval.state') = 'cancelled' OR (
+          json_extract(record, '$.mediaRemoval.state') = 'failed' AND json_extract(record, '$.mediaRemoval.cause') = 'idle_cleanup' AND
+          EXISTS (SELECT 1 FROM json_each(json_extract(record, '$.mediaRemoval.outcomes'))
+            WHERE json_extract(value, '$.identity') = ? AND json_extract(value, '$.outcome') = 'retained')
+        )) RETURNING id`).get(now().toISOString(), id, artifactIdentity ?? null) !== undefined;
     },
     requestMediaRemoval<T>(input: Parameters<DamagePreviewAccess["requestMediaRemoval"]>[0], prepare: Parameters<DamagePreviewAccess["requestMediaRemoval"]>[1], present: (record: DamagePreviewRecord) => T): T {
       const operation = `damage-preview-${input.cause}`;

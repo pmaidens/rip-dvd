@@ -42,7 +42,9 @@ export function damagePreviewMediaState(record: DamagePreviewRecord, targets = p
   }[removal.state];
   const files = record.artifacts.map((artifact) => {
     const { filesystemIdentity: identity, ...observation } = targets.find((target) => target.identity === artifact.identity)!.observation;
-    const media = removalCondition ?? observation;
+    const retainedAfterFailure = removal?.state === "failed" && removal.cause === "idle_cleanup" &&
+      removal.outcomes.some((outcome) => outcome.identity === artifact.identity && outcome.outcome === "retained");
+    const media = retainedAfterFailure ? observation : removalCondition ?? observation;
     return { identity, media };
   });
   const unavailable = targets.find((target) => ["unsafe", "unavailable"].includes(target.observation.state));

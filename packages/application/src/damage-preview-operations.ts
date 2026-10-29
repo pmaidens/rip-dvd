@@ -155,7 +155,7 @@ export async function openDamagePreviewArtifact(access: DataAccess, identity: st
     const hash = createHash("sha256");
     for await (const chunk of file.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
     if (hash.digest("hex") !== artifact.sha256) throw new Error("Preview media identity changed.");
-    if (!access.damagePreviews.touchMedia(record.id)) {
+    if (!access.damagePreviews.touchMedia(record.id, identity)) {
       const current = describeDamagePreview(access, requiredRecord(access, record.id));
       const code = current.artifacts.find((item) => item.identity === identity)?.media.reasonCode ?? "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE";
       throw new DamagePreviewRejectedError(code, [{ code, message: "Media removal won the access race. Inspect the retained request history." }], current);

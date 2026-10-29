@@ -67,7 +67,7 @@ export interface DamagePreviewAccess {
   cancel<T>(id: string, mutationKey: string, present: (record: DamagePreviewRecord) => T): T;
   claim(workerId: string): DamagePreviewRecord | null;
   update(record: DamagePreviewRecord): void;
-  touchMedia(id: string): boolean;
+  touchMedia(id: string, artifactIdentity?: string): boolean;
   requestMediaRemoval<T>(input: { id: string; mutationKey: string; mediaToken: string; cause: DamagePreviewMediaRemoval["cause"] },
     prepare: (record: DamagePreviewRecord) => {
       expectedFiles: DamagePreviewMediaRemoval["expectedFiles"];

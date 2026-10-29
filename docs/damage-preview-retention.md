@@ -116,6 +116,9 @@ present remain available for review and export. If a prior worker already
 unlinked some targets, restart reconciles those absences and synchronizes their
 directories before settling; missing media is reported distinctly, and a sync
 failure remains failed. A later explicit deletion remains an independent choice.
+An aggregate cleanup failure keeps its failed outcome while files explicitly
+retained for review remain available through download and CLI export. Access
+still verifies canonical bytes and atomically rejects any new pending removal.
 
 The worker checks each admitted file identity immediately before unlinking and
 synchronizes the containing directory. Restart resumes the same pending intent;
