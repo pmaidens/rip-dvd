@@ -106,9 +106,11 @@ Filesystem observations and response projection run outside SQLite writer
 transactions. Admission rechecks preview metadata, current review state and
 recorded output authority using the staged observations. Before executing idle
 cleanup, the worker checks retention again. A newly protected sample cancels
-that cleanup with `DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED`, retains its bytes,
-and remains available for review and export. A later explicit deletion remains
-an independent choice.
+further unlinking with `DAMAGE_PREVIEW_CLEANUP_RETENTION_CHANGED`. Files still
+present remain available for review and export. If a prior worker already
+unlinked some targets, restart reconciles those absences and synchronizes their
+directories before settling; missing media is reported distinctly, and a sync
+failure remains failed. A later explicit deletion remains an independent choice.
 
 The worker checks each admitted file identity immediately before unlinking and
 synchronizes the containing directory. Restart resumes the same pending intent;
