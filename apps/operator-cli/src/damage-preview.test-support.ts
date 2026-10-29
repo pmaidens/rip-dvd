@@ -1,4 +1,4 @@
-import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput } from "@rip-dvd/data-access";
+import type { CommittedDvdCheckpointEvidence, DvdTitleIdentityObservationInput, UnreadableSectorRange } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
@@ -8,7 +8,7 @@ export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
   timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
-  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[] } = {},
+  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[]; singleChapter?: boolean; sourceExtent?: UnreadableSectorRange } = {},
 ) {
   const { archive, manifest } = options.evidence ?? await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
@@ -16,7 +16,7 @@ export async function seedDamagePreview(
   const sqlite = new DatabaseSync(fixture.databasePath);
   if (options.stopRecovery !== false) sqlite.prepare("UPDATE archive_recoveries SET status = 'stopped', stop_operation_id = 'synthetic-stop', stop_requested_at = 1, stopped_at = 1 WHERE original_disc_archive_id = ?").run(archive.id);
   const disc = sqlite.prepare("SELECT detected_disc_id FROM original_disc_archives WHERE id = ?").get(archive.id)!;
-  const scan = { schemaVersion: 2, contentId: archive.fingerprint, titles: [{ number: 1, durationSeconds: 500, chapters: 4, audioStreams: [{ id: 128, format: "ac3" }], subtitles: [] }] };
+  const scan = { schemaVersion: 2, contentId: archive.fingerprint, titles: [{ number: 1, durationSeconds: 500, chapters: options.singleChapter ? 1 : 4, audioStreams: [{ id: 128, format: "ac3" }], subtitles: [] }] };
   sqlite.prepare("UPDATE detected_discs SET scan_data = ? WHERE id = ?").run(JSON.stringify(scan), String(disc.detected_disc_id));
   sqlite.close();
   const access = fixture.openAccess();
@@ -26,7 +26,7 @@ export async function seedDamagePreview(
     findings: (["filesystem_structure", "dvd_navigation", "title_enumeration"] as const).map((checkKind) => ({
       checkKind,
       policyVersion: "synthetic-structure-v1",
-      testedExtent: { startLba: 0, endLbaExclusive: 1_024, observedSectorCount: 1_024 },
+      testedExtent: { startLba: 0, endLbaExclusive: manifest.acceptedEndLbaExclusive, observedSectorCount: manifest.acceptedEndLbaExclusive },
       outcome: "valid" as const,
       reason: null,
       evidenceReference: `synthetic:${checkKind}`,
@@ -39,8 +39,8 @@ export async function seedDamagePreview(
       displayTitleNumber: number,
       navigation: { videoTitleSetNumber: 1, titleSetTitleNumber: number, programChainNumber: number },
       selectedPath: [{ programNumber: 1, cellNumber: 1, vobId: 1, cellId: 1 }],
-      angleNumber: 1, angleCount: 1, chapterStart: 1, chapterEnd: 4, chapterCount: 4,
-      sourceExtents: [{ startLba: 0, sectorCount: 100 }],
+      angleNumber: 1, angleCount: 1, chapterStart: 1, chapterEnd: options.singleChapter ? 1 : 4, chapterCount: options.singleChapter ? 1 : 4,
+      sourceExtents: [options.sourceExtent ?? { startLba: 0, sectorCount: 100 }],
     })), ...(options.additionalTitleObservations ?? [])],
   });
   const observation = reviewSet.items[0]!.observation;

@@ -1,5 +1,6 @@
 import { fingerprintCompletedEncodeOutput } from "./encode-output-completion.js";
-import { assertEncodeClaimSource } from "@rip-dvd/application";
+import { assertEncodeClaimSource, measureEncodeSourceCell, measureEncodeOutputCell,
+  type EncodeSourceCellMeasurement } from "@rip-dvd/application";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -2035,6 +2036,7 @@ export async function executeEncodeClaim(
       | undefined;
     const subtitleProvenance = createHandBrakeSubtitleProvenanceParser();
     const audioProvenance = createHandBrakeAudioProvenanceParser();
+    let sourceCell: EncodeSourceCellMeasurement | undefined;
     const readArchive = async (
       ownership?: ArchiveImageOwnershipHandle,
     ): Promise<void> => {
@@ -2108,6 +2110,13 @@ export async function executeEncodeClaim(
       parseProgress("", true);
       readSignal.throwIfAborted();
       ownership?.assertOwned();
+      if (ownership !== undefined) {
+        const snapshot = options.access.encodeJobs.findClaimSnapshot(claim.claimToken);
+        if (snapshot !== null) {
+          sourceCell = await measureEncodeSourceCell(snapshot, sourcePath, ownership);
+          await assertEncodeClaimSource(options.access, claim, ownership, options.originalsLibraryPath);
+        }
+      }
     };
     if (input.evidenceFormat === null) {
       await readArchive();
@@ -2145,6 +2154,7 @@ export async function executeEncodeClaim(
         ? { vobSubProvenance: subtitleProvenance.finish(expectedVobSubStreams) }
         : {}),
     });
+    const correspondence = sourceCell === undefined ? undefined : await measureEncodeOutputCell(sourceCell, partialPath, signal);
     signal.throwIfAborted();
     const validatedPartialMetadata = await requireRegularOutputForValidation(
       partialPath,
@@ -2153,7 +2163,8 @@ export async function executeEncodeClaim(
     await syncPath(partialPath);
     renewClaim();
     options.access.encodeJobs.recordOutputValidation(claim,
-      encodeOutputFilesystemIdentity(validatedPartialMetadata), validationEvidence ?? null);
+      encodeOutputFilesystemIdentity(validatedPartialMetadata), validationEvidence == null ? null
+        : { ...validationEvidence, ...(correspondence === undefined ? {} : { correspondence }) });
     failurePhase = "publication";
     publishedOutputMetadata = validatedPartialMetadata;
     pendingPartialCleanup =
