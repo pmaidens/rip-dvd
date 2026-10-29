@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { unlinkSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { encodeOutputArtifactIdentity, type EncodeOutputInspection, type DamagePreviewInspection } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "../../../../../operator-cli/src/operator-workflow.test-support.js";
@@ -61,5 +61,28 @@ it("shares exact-source receipt release and keyed idle cleanup between HTTP and 
     expect((await inspectPreview()).media.removal?.state).toBe("pending");
     settleDamagePreviewMedia(fixture);
     expect((await inspectPreview()).media.removal?.state).toBe("complete");
+  } finally { access.close(); }
+});
+
+it("shares retention protection for an acknowledged complete validation-failed output", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { id, path, identity, inspectPreview, acknowledge } = await seedProvedPreviewOutput(fixture, { validationFailed: true });
+  await acknowledge("synthetic-http-failed-output-receipt");
+  const current = await inspectPreview();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * 24 * 60 * 60 * 1_000);
+  const access = fixture.openAccess();
+  const origin = "http://localhost:3000";
+  try {
+    const inspected = await createDamagePreviewRoute(new Request(`${origin}/api/damage-previews/${id}`), id, () => access);
+    const protectedPreview = await inspected.json();
+    expect(protectedPreview).toEqual(await inspectPreview());
+    expect(protectedPreview).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: false,
+      outputs: [{ artifactIdentity: identity, acknowledgementStatus: "acknowledged", reasonCode: "FINISHED_OUTPUT_VALIDATION_UNPROVED" }] }, media: { retention: { protectedForReview: true } } });
+    const input = { mutationKey: "synthetic-http-failed-output-cleanup", mediaToken: current.media.token };
+    const cleanup = await createDamagePreviewMediaRemovalRoute(new Request(`${origin}/api/damage-previews/${id}/media`, { method: "POST", headers: { Origin: origin, Host: "localhost:3000", "Content-Type": "application/json" }, body: JSON.stringify(input) }), id, () => access, () => origin);
+    expect(cleanup.status).toBe(409);
+    expect(await cleanup.json()).toEqual((await fixture.run(["damage-preview", "cleanup", id, "--key", input.mutationKey, "--json", JSON.stringify({ mediaToken: input.mediaToken })])).result);
+    settleDamagePreviewMedia(fixture);
+    expect(existsSync(path)).toBe(true);
   } finally { access.close(); }
 });

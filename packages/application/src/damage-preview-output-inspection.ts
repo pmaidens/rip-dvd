@@ -41,8 +41,9 @@ export function observeDamagePreviewOutputAcknowledgements(access: DataAccess, r
     // inspector's exact-generation receipts below can establish acknowledgement.
     if (access.encodeOutputInspectionReceipts.list(job.id, { limit: 1, offset: 0 }).receipts.length === 0) continue;
     const retained = access.encodeJobs.listRetainedOutputHistoryPage(job.id, { limit: OUTPUT_LIMIT + 1 });
-    truncated ||= retained.nextOffset !== null;
-    references.push(...encodeOutputArtifactReferences(job, links, retained.outputs));
+    const failed = access.encodeJobs.listValidationFailedOutputSummaries(job.id, { limit: OUTPUT_LIMIT + 1 });
+    truncated ||= retained.nextOffset !== null || failed.length > OUTPUT_LIMIT;
+    references.push(...encodeOutputArtifactReferences(job, links, retained.outputs, failed));
   }
   if (references.length === 0 && !truncated) return { inspection: null, isCurrent: () => true };
   truncated ||= references.length > OUTPUT_LIMIT;

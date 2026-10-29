@@ -29,6 +29,10 @@ generation, validation identity and immutable provenance. The receipt must have
 captured passing validation with its immutable validation record and checks.
 Failed outputs and receipts with unknown validation cannot release retention.
 A successful later probe cannot upgrade the receipt's original unknowns.
+Retained validation-failed artifacts are discovered through bounded summaries
+and report `FINISHED_OUTPUT_VALIDATION_UNPROVED` even after acknowledgement.
+Read-only Keep preflight does not release retention. A later passing generation
+requires its own applicable acknowledgement.
 
 The source comparison uses only the preview's saved request and the receipt's
 original source snapshot. It requires the same archive identity/fingerprint,

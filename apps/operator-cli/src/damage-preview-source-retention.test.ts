@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
@@ -123,24 +123,72 @@ it("preserves an applicable passing receipt after a later same-generation probe-
     outputs: [expect.objectContaining({ acknowledgementStatus: "acknowledged", reasonCode: null, matchingReceipts: expect.arrayContaining([(first.result as { receipt: unknown }).receipt]) })] } });
 });
 
-it.each(["failed_output", "unknown_source"] as const)("protects media from a persisted %s receipt even when its file generation matches", async (kind) => {
+it("protects media from a persisted unknown-source receipt even when its file generation matches", async () => {
   const { fixture, identity, inspectOutput, inspectPreview } = await setup();
   const current = await inspectOutput();
-  const evidence = kind === "failed_output"
-    ? { ...current.artifact, state: "retained_validation_failed", validation: { ...current.artifact.validation, result: "failed" } }
-    : { ...current.artifact, provenance: { ...current.artifact.provenance, sourceSnapshot: null, sourceSnapshotAvailability: "not_recorded" } };
-  // Adversarial durable producer evidence exercises the consumer before the
-  // failed-output producer is available. No failed-output action is invented.
+  const evidence = { ...current.artifact, provenance: { ...current.artifact.provenance, sourceSnapshot: null, sourceSnapshotAvailability: "not_recorded" } };
+  // Inconsistent durable evidence cannot gain authority from a matching job.
   const access = fixture.openAccess();
   try {
-    access.encodeOutputInspectionReceipts.record({ mutationKey: `synthetic-persisted-${kind}`, artifactIdentity: identity, reviewToken: current.operatorInspection.reviewToken, acknowledged: true }, () => ({
+    access.encodeOutputInspectionReceipts.record({ mutationKey: "synthetic-persisted-unknown-source", artifactIdentity: identity, reviewToken: current.operatorInspection.reviewToken, acknowledged: true }, () => ({
       generationIdentity: current.operatorInspection.generationIdentity!, encodeJobId: current.artifact.provenance.encodeJobId,
       evidenceJson: JSON.stringify(evidence), assertAuthority() {},
     }));
   } finally { access.close(); }
   expect(await inspectPreview()).toMatchObject({ outdated: false, media: { retention: { protectedForReview: true } }, finishedOutputInspection: { retentionSatisfied: false,
-    outputs: [{ reasonCode: kind === "failed_output" ? "FINISHED_OUTPUT_VALIDATION_UNPROVED" : "FINISHED_OUTPUT_INSPECTION_NOT_RECORDED" }] } });
+    outputs: [{ reasonCode: "FINISHED_OUTPUT_INSPECTION_NOT_RECORDED" }] } });
   expect((await inspectOutput()).operatorInspection.history[0]!.evidence).toEqual(evidence);
+});
+
+it("keeps a current sample after a real failed-output receipt and read-only Keep preflight", async () => {
+  const { fixture, id, path, identity, inspectPreview, inspectOutput, acknowledge, probe } = await setup({ validationFailed: true });
+  expect((await inspectOutput()).operatorInspection.history).toEqual([]);
+  await acknowledge("synthetic-real-failed-retention-ack");
+  const history = (await inspectOutput()).operatorInspection.history;
+  expect(history[0]!.evidence).toMatchObject({ state: "validation_failed", validation: { result: "failed" }, provenance: { sourceSnapshotAvailability: "recorded" } });
+  expect(await fixture.run(["encode-output", "keep-preflight", identity], undefined, undefined, { encodeOutputMediaProbe: probe })).toMatchObject({ exitCode: 0 });
+  const current = await inspectPreview();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
+  expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: false,
+    outputs: [{ artifactIdentity: identity, acknowledgementStatus: "acknowledged", matchingReceipts: history, reasonCode: "FINISHED_OUTPUT_VALIDATION_UNPROVED" }] },
+    media: { retention: { protectedForReview: true, activeCatalogReview: false, reasonCodes: ["FINISHED_OUTPUT_VALIDATION_UNPROVED"] } } });
+  expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-real-failed-cleanup", "--json", JSON.stringify({ mediaToken: current.media.token })])).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_CLEANUP_UNAVAILABLE" } } });
+  settleDamagePreviewMedia(fixture);
+  expect(existsSync(path)).toBe(true);
+  expect((await inspectOutput()).operatorInspection.history).toEqual(history);
+});
+
+it("does not transfer a failed-output receipt to a later passing generation of the same job", async () => {
+  const { fixture, seeded, identity, claim, inspectPreview, inspectOutput, acknowledge, probe } = await setup({ validationFailed: true });
+  await acknowledge("synthetic-failed-before-normal-receipt");
+  const failedReceipt = (await inspectOutput()).operatorInspection.receipts[0]!;
+  const access = openEncodeSourceTestAccess(fixture);
+  try {
+    access.encodeJobs.requeue(claim.id, { expectedSourceDecision: seeded.expectedSourceDecision });
+    const next = (await claimNextEncodeJob(access, "synthetic-normal-after-failed-worker", fixture.originalsLibraryPath))!;
+    publishSyntheticClaim(access, next);
+    const normalIdentity = encodeOutputArtifactIdentity(next.id);
+    const normal = (await fixture.run(["encode-output", "inspect", normalIdentity], undefined, undefined, { encodeOutputMediaProbe: probe })).result as EncodeOutputInspection;
+    expect(normal.operatorInspection).toMatchObject({ receipts: [], history: [failedReceipt] });
+    expect(normal.operatorInspection.generationIdentity).not.toBe(failedReceipt.generationIdentity);
+    expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: false }, media: { retention: { protectedForReview: true } } });
+    expect(await fixture.run(["encode-output", "acknowledge-inspection", normalIdentity, "--key", "synthetic-normal-after-failed-ack", "--json", JSON.stringify({ acknowledged: true, reviewToken: normal.operatorInspection.reviewToken })], undefined, undefined, { encodeOutputMediaProbe: probe })).toMatchObject({ exitCode: 0 });
+    expect(await inspectPreview()).toMatchObject({ finishedOutputInspection: { retentionSatisfied: true, outputs: expect.arrayContaining([
+      expect.objectContaining({ artifactIdentity: normalIdentity, reasonCode: null }),
+      expect.objectContaining({ artifactIdentity: identity, reasonCode: "FINISHED_OUTPUT_VALIDATION_UNPROVED" }),
+    ]) } });
+  } finally { access.close(); }
+});
+
+it("rejects a rewritten failed artifact even after its size and modification time are restored", async () => {
+  const { validation, inspectPreview, acknowledge } = await setup({ validationFailed: true });
+  await acknowledge("synthetic-failed-before-restored-mtime");
+  const before = lstatSync(validation.outputPath);
+  writeFileSync(validation.outputPath, "SYNTHETIC COMPLETE FAILED ENCODE");
+  utimesSync(validation.outputPath, before.atime, before.mtime);
+  expect(lstatSync(validation.outputPath).size).toBe(before.size);
+  expect(await inspectPreview()).toMatchObject({ finishedOutputInspection: { retentionSatisfied: false,
+    outputs: [{ acknowledgementStatus: "unavailable", matchingReceipts: [], reasonCode: "FINISHED_OUTPUT_UNAVAILABLE" }] }, media: { retention: { protectedForReview: true } } });
 });
 
 it.each(["bytes", "validation"] as const)("protects previously releasable media when the exact output %s changes", async (changed) => {

@@ -1030,7 +1030,8 @@ export function inspectEncodeOutputIdentity(access: DataAccess, artifactIdentity
   }
   const unsafe = fileIsRegularAndNonempty(metadata);
   if (unsafe !== null) return present(fileUnavailable(base, unsafe.code, unsafe.reason));
-  if (base.recordedFilesystemIdentity !== null && !matchesEncodeOutputFilesystemIdentity(base.recordedFilesystemIdentity, metadata)) {
+  if (base.recordedFilesystemIdentity !== null && (!matchesEncodeOutputFilesystemIdentity(base.recordedFilesystemIdentity, metadata) ||
+      (base.recordedChangeTimeMs !== undefined && metadata.ctimeMs !== base.recordedChangeTimeMs))) {
     return present(fileUnavailable(base, "OUTPUT_IDENTITY_CHANGED", "The Encode Output no longer matches its recorded file identity."));
   }
   const changed = changedAuthorityResponse(access, parsed, base);
