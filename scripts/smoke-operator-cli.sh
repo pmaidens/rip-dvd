@@ -351,7 +351,7 @@ printf '%s\n' "$invalid_preview_export" | assert_json_fields 'error.code=EXPORT_
 
 # Real installed CLI admission must work with read-only source and output mounts.
 # The configured writable Encode worker, started separately, owns the unlink.
-docker compose --project-name "$project_name" config --format json | node --input-type=module -e '
+docker compose --project-name "$project_name" --profile maintenance config --format json | node --input-type=module -e '
   let text=""; for await (const chunk of process.stdin) text+=chunk;
   const config=JSON.parse(text);
   for (const service of ["web","operator-cli"]) {
