@@ -47,9 +47,11 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
 }, testInfo) => {
   const variant = fixtureVariant(testInfo.project.name);
   const acknowledgements: unknown[] = [];
-  if (validationFailed) await page.route("**/api/dashboard*", async (route) => {
+  if (validationFailed) await page.route(/\/api\/dashboard(?:\/events)?(?:\?|$)/, async (route) => {
     const backendUrl = new URL(route.request().url());
+    const isEventStream = backendUrl.pathname.endsWith("/events");
     backendUrl.hostname = "127.0.0.1";
+    backendUrl.pathname = "/api/dashboard";
     const response = await route.fetch({ url: backendUrl.toString() });
     const body = await response.json();
     body.encodeJobs.items = body.encodeJobs.items.map((job: { encodeOutputArtifacts?: { identity: string; state: string }[] }) => ({
@@ -57,7 +59,9 @@ test(`inspects and explicitly acknowledges a canonical Encode Output, scenario=$
         identity: artifact.identity.replace(".published.", ".failed."), state: "validation_failed",
       })),
     }));
-    await route.fulfill({ response, json: body });
+    if (isEventStream) {
+      await route.fulfill({ contentType: "text/event-stream", body: `id: ${body.generatedAt}\nevent: dashboard\ndata: ${JSON.stringify(body)}\n\n` });
+    } else await route.fulfill({ response, json: body });
   });
   await page.route("**/api/encode-outputs/*", async (route) => {
     const artifactIdentity = decodeURIComponent(
