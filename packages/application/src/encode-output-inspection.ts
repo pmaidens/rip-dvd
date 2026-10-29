@@ -59,8 +59,6 @@ export interface EncodeOutputMediaStream {
 export interface EncodeOutputMediaInspection {
   durationSeconds: number | null;
   streams: EncodeOutputMediaStream[];
-  /** Present only when the interval operation measured bounded canonical bytes. */
-  sha256?: string | null;
 }
 
 export type EncodeOutputMediaProbe = (
@@ -944,7 +942,6 @@ export async function inspectEncodeOutputEvidence(
       media: {
         durationSeconds: media.durationSeconds,
         streams: media.streams,
-        ...(media.sha256 === undefined ? {} : { sha256: media.sha256 }),
         playability: "not_assessed",
       },
     },

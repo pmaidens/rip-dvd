@@ -1,6 +1,6 @@
 import { lstatSync, utimesSync, writeFileSync } from "node:fs";
 import { afterEach, expect, it } from "vitest";
-import { claimNextEncodeJob } from "@rip-dvd/application";
+import { claimNextEncodeJob, type EncodeOutputIntervalInspection } from "@rip-dvd/application";
 import { publishMeasuredCorrespondenceOutput } from "./encode-output-measured-correspondence.test-support.js";
 import { publishSyntheticClaim } from "./encode-output-provenance.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
@@ -20,6 +20,9 @@ it("locates the measured whole-cell envelope through the public CLI without usin
           measuredCorrespondence: { policyVersion: "encode-output-exact-cell-video-v1", status: "measured" } } }],
       targetedLocation: { eligible: true, reasonCode: null },
     } });
+    const ordinary = await fixture.run(["encode-output", "inspect", seeded.artifactIdentity],
+      undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 1, streams: [] }) });
+    expect((result.result as EncodeOutputIntervalInspection).inspection).toEqual(ordinary.result);
     writeFileSync(seeded.archive.archivePath, "synthetic changed source after publication");
     const after = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
       undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 1, streams: [] }) });
@@ -32,6 +35,9 @@ it.each([
   [{ outputFrames: ["lead", "a", "c", "tail"] }, "OUTPUT_CONTENT_UNRESOLVED"],
   [{ outputFrames: ["a", "b"] }, "OUTPUT_CONTENT_UNRESOLVED"],
   [{ decoderFailure: true }, "OUTPUT_MEASUREMENT_FAILED"],
+  [{ incompleteNativeFrames: true }, "OUTPUT_MEASUREMENT_FAILED"],
+  [{ sourceFault: "zeroed_sector" }, "OUTPUT_CELL_UNSUPPORTED"],
+  [{ sourceFault: "encrypted_packet" }, "OUTPUT_CELL_UNSUPPORTED"],
 ] as const)("keeps incomplete or ambiguous measured content unknown, %j", async (options, reasonCode) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await publishMeasuredCorrespondenceOutput(fixture, options);
@@ -42,6 +48,18 @@ it.each([
       inspection: { artifact: { inspectability: { status: "inspected" } } },
       intervals: [{ status: "unknown", outputInterval: null, reasonCode }],
       targetedLocation: { eligible: false, reasonCode: "OUTPUT_MAPPING_UNKNOWN" },
+    } });
+  } finally { seeded.access.close(); }
+});
+
+it("uses native decoded timestamps when the framehash encoder rounds the output time base", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await publishMeasuredCorrespondenceOutput(fixture, { outputOffsetMilliseconds: 21 });
+  try {
+    const result = await fixture.run(["encode-output", "intervals", seeded.artifactIdentity, "--json", JSON.stringify(seeded.query)],
+      undefined, undefined, { encodeOutputMediaProbe: async () => ({ durationSeconds: 1, streams: [] }) });
+    expect(result).toMatchObject({ exitCode: 0, result: {
+      intervals: [{ status: "verified", outputInterval: { startMilliseconds: 61, endMilliseconds: 181 } }],
     } });
   } finally { seeded.access.close(); }
 });

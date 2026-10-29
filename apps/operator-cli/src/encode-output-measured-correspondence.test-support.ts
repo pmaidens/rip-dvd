@@ -15,17 +15,29 @@ function frames(values: readonly string[], start: number) {
 
 export async function publishMeasuredCorrespondenceOutput(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
-  options: { outputFrames?: readonly string[]; decoderFailure?: boolean } = {},
+  options: { outputFrames?: readonly string[]; decoderFailure?: boolean; outputOffsetMilliseconds?: number;
+    incompleteNativeFrames?: boolean; sourceFault?: "zeroed_sector" | "encrypted_packet" } = {},
 ) {
-  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true, singleCell: { imageContents: Buffer.alloc(100 * 2048, "synthetic source sectors") } });
+  const imageContents = Buffer.alloc(100 * 2048, 0xff);
+  for (let offset = 0; offset < imageContents.length; offset += 2048) {
+    imageContents.set([0, 0, 1, 0xba, 0x44, 0, 4, 0, 4, 1, 0, 0, 3, 0], offset);
+    imageContents.set([0, 0, 1, 0xe0, 7, 0xec, 0x80, 0, 0], offset + 14);
+  }
+  if (options.sourceFault === "zeroed_sector") imageContents.fill(0, 10 * 2048, 11 * 2048);
+  if (options.sourceFault === "encrypted_packet") imageContents[20] = 0xa0;
+  const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true, singleCell: { imageContents } });
   try {
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     writeFileSync(seeded.claim.outputPath, "synthetic canonical output");
     const runMediaTool: CorrespondenceMediaTool = async (request) => {
       if (options.decoderFailure) throw new Error("Synthetic decoder failure");
+      const values = request.arguments_.includes(seeded.claim.outputPath) ? options.outputFrames ?? ["lead", "a", "b", "c", "tail"] : ["a", "b", "c"];
+      const measuredValues = options.incompleteNativeFrames ? values.slice(1) : values;
+      const offset = request.arguments_.includes(seeded.claim.outputPath) ? options.outputOffsetMilliseconds ?? 0 : 0;
       return { stdout: request.arguments_.includes("framehash")
-        ? frames(request.arguments_.includes(seeded.claim.outputPath) ? options.outputFrames ?? ["lead", "a", "b", "c", "tail"] : ["a", "b", "c"], 250)
-        : JSON.stringify({ streams: [{ width: 64, height: 64, pix_fmt: "yuv420p" }], format: { start_time: "10" } }), stderr: "" };
+        ? frames(values, 250)
+        : JSON.stringify({ streams: [{ width: 64, height: 64, pix_fmt: "yuv420p", time_base: "1/1000" }],
+          frames: measuredValues.map((_, index) => ({ pts: 10000 + offset + index * 40, pkt_duration: 40 })), format: { start_time: "10" } }), stderr: "" };
     };
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
       archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath,

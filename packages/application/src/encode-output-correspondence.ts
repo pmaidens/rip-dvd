@@ -47,6 +47,7 @@ interface IntervalClassification {
     claimSnapshotId: string | null;
     assessmentIdentity: string | null;
     observedFileIdentity: string | null;
+    observedOutputBytesSha256: string | null;
     inspectionReasonCode: string | null;
     requestedMapping: SourceSnapshot["source"]["assessment"]["items"][number] | null;
     selectedMapping: SourceSnapshot["source"]["assessment"]["items"][number] | null;
@@ -56,7 +57,7 @@ interface IntervalClassification {
 
 function classifyInterval(
   inspection: EncodeOutputInspection, snapshot: SourceSnapshot | null,
-  query: IntervalQuery, intervalIndex: number,
+  query: IntervalQuery, intervalIndex: number, observedOutputBytesSha256: string | null,
 ): IntervalClassification {
   const { artifact } = inspection;
   const source = snapshot?.source;
@@ -73,6 +74,7 @@ function classifyInterval(
       claimSnapshotId: snapshot?.id ?? null,
       assessmentIdentity: assessment?.id ?? null,
       observedFileIdentity: artifact.file.identity,
+      observedOutputBytesSha256,
       inspectionReasonCode: artifact.inspectability.reasonCode,
       requestedMapping: requested ?? null,
       selectedMapping: selected ?? null,
@@ -121,7 +123,7 @@ function classifyInterval(
         measured.claimSnapshotId !== snapshot!.id || measured.assessmentIdentity !== assessment.id ||
         measured.titleIdentityObservationId !== source.titleIdentity.id ||
         !same(measured.checkpoint, source.checkpoint) || !same(measured.resolvedSource, source.resolvedSource) ||
-        measured.outputFileIdentity !== artifact.file.identity || !("sha256" in artifact.media) || measured.outputBytesSha256 !== artifact.media.sha256 ||
+        measured.outputFileIdentity !== artifact.file.identity || measured.outputBytesSha256 !== observedOutputBytesSha256 ||
         !/^[a-f0-9]{64}$/.test(measured.sourceBytesSha256) || !/^[a-f0-9]{64}$/.test(sourceVideo.sequenceSha256) ||
         sourceVideo.sequenceSha256 !== outputVideo.sequenceSha256 || sourceVideo.frameCount < 1 ||
         sourceVideo.frameCount !== outputVideo.frameCount || sourceVideo.width !== outputVideo.width || sourceVideo.height !== outputVideo.height ||
@@ -153,14 +155,14 @@ export async function inspectEncodeOutputIntervals(
   access: DataAccess, artifactIdentity: unknown, input: unknown, mediaProbe?: EncodeOutputMediaProbe,
 ) {
   const query = parseQuery(input);
+  let observedOutputBytesSha256: string | null = null;
   const inspection = await inspectEncodeOutput(access, artifactIdentity, async (path) => {
     const media = await (mediaProbe ?? probeEncodeOutputMedia)(path);
-    let sha256: string | null = null;
-    try { sha256 = await hashEncodeOutputBytes(path, new AbortController().signal); } catch { /* Ordinary inspection remains available. */ }
-    return { ...media, sha256 };
+    try { observedOutputBytesSha256 = await hashEncodeOutputBytes(path, new AbortController().signal); } catch { /* Ordinary inspection remains available. */ }
+    return media;
   });
   const snapshot: SourceSnapshot | null = inspection.artifact.provenance.sourceSnapshot;
-  const intervals = query.intervalIndexes.map((index) => classifyInterval(inspection, snapshot, query, index));
+  const intervals = query.intervalIndexes.map((index) => classifyInterval(inspection, snapshot, query, index, observedOutputBytesSha256));
   const unknown = intervals.some((interval) => interval.status === "unknown");
   const verified = intervals.every((interval) => interval.status === "verified");
   return {

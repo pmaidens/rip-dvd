@@ -44,22 +44,28 @@ function sequenceDigest(frames: readonly Frame[]) {
 }
 
 async function decodeVideo(path: string, signal: AbortSignal, tool: CorrespondenceMediaTool): Promise<DecodedVideo> {
-  const run = (executable: CorrespondenceMediaToolRequest["executable"], arguments_: string[]) =>
-    tool({ executable, arguments_, signal, timeoutMs: TOOL_TIMEOUT_MS });
+  const run = async (executable: CorrespondenceMediaToolRequest["executable"], arguments_: string[]) => {
+    const result = await tool({ executable, arguments_, signal, timeoutMs: TOOL_TIMEOUT_MS });
+    if (result.stderr.trim()) throw new Error("Media tool reported a decoding error");
+    return result;
+  };
   const probe = JSON.parse((await run("ffprobe", ["-v", "error", "-select_streams", "v", "-show_entries",
-    "stream=width,height,pix_fmt:format=start_time", "-of", "json", path])).stdout) as {
-      streams?: { width: number; height: number; pix_fmt: string }[]; format?: { start_time?: string };
+    "stream=width,height,pix_fmt,time_base:frame=pts,pkt_duration:format=start_time", "-show_frames", "-err_detect", "explode", "-of", "json", path])).stdout) as {
+      streams?: { width: number; height: number; pix_fmt: string; time_base: string }[];
+      frames?: { pts: number; pkt_duration: number }[]; format?: { start_time?: string };
     };
   const stream = probe.streams?.[0];
   const originSeconds = Number(probe.format?.start_time);
   if (probe.streams?.length !== 1 || !stream || stream.pix_fmt !== "yuv420p" ||
       !Number.isSafeInteger(stream.width) || !Number.isSafeInteger(stream.height) ||
       stream.width < 2 || stream.height < 2 || stream.width > 1920 || stream.height > 1080 ||
-      !Number.isFinite(originSeconds)) throw new Error("Unsupported measured video");
-  const text = (await run("ffmpeg", ["-nostdin", "-v", "error", "-xerror", "-threads", "1", "-copyts", "-i", path,
+      !Number.isFinite(originSeconds) || !Array.isArray(probe.frames) || probe.frames.length > MAX_FRAMES) throw new Error("Unsupported measured video");
+  const text = (await run("ffmpeg", ["-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-threads", "1", "-copyts", "-i", path,
     "-map", "0:v:0", "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-c:v", "rawvideo", "-threads", "1",
     "-f", "framehash", "-hash", "sha256", "-"])).stdout;
-  const timeBaseMatch = /^#tb 0: (\d+)\/(\d+)\s*$/m.exec(text);
+  // Rawvideo encoder timestamps can be quantized to inverse frame rate. Use
+  // the native decoded-frame timestamps, pairing both complete decode orders.
+  const timeBaseMatch = /^(\d+)\/(\d+)$/.exec(stream.time_base);
   const dimensions = /^#dimensions 0: (\d+)x(\d+)\s*$/m.exec(text);
   const numerator = Number(timeBaseMatch?.[1]), denominator = Number(timeBaseMatch?.[2]);
   if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || numerator <= 0 || denominator <= 0 ||
@@ -68,14 +74,15 @@ async function decodeVideo(path: string, signal: AbortSignal, tool: Corresponden
   for (const line of text.split("\n")) {
     if (!line.trim() || line.startsWith("#")) continue;
     const fields = line.split(",").map((field) => field.trim());
-    const pts = Number(fields[2]), duration = Number(fields[3]);
+    const nativeFrame = probe.frames[frames.length];
+    const pts = nativeFrame?.pts, duration = nativeFrame?.pkt_duration;
     if (fields.length !== 6 || fields[0] !== "0" || !Number.isSafeInteger(pts) || !Number.isSafeInteger(duration) || duration <= 0 ||
-        !Number.isSafeInteger(pts + duration) || Number(fields[4]) !== stream.width * stream.height * 1.5 ||
+        pts === undefined || duration === undefined || !Number.isSafeInteger(pts + duration) || Number(fields[4]) !== stream.width * stream.height * 1.5 ||
         !/^[a-f0-9]{64}$/.test(fields[5]!) || frames.length >= MAX_FRAMES ||
-        (frames.length > 0 && pts !== frames.at(-1)!.pts + frames.at(-1)!.duration)) throw new Error("Incomplete frame sequence");
+        (frames.length > 0 && pts <= frames.at(-1)!.pts)) throw new Error("Incomplete frame sequence");
     frames.push({ pts, duration, sha256: fields[5]! });
   }
-  if (frames.length === 0) throw new Error("No measured video frames");
+  if (frames.length === 0 || frames.length !== probe.frames.length) throw new Error("Incomplete measured video frames");
   return { frames, originSeconds, summary: {
     frameCount: frames.length, width: stream.width, height: stream.height, pixelFormat: "yuv420p",
     sequenceSha256: sequenceDigest(frames), timeBase: { numerator, denominator },
@@ -90,6 +97,29 @@ interface SourceCellMeasurement {
   video: DecodedVideo;
 }
 export type EncodeSourceCellMeasurement = SourceCellMeasurement | UnknownCorrespondence;
+
+// DVD content packs are sector aligned. Reject unread zeroed sectors, encrypted
+// PES payloads and incomplete packs before a decoder can silently skip them.
+function completeClearDvdPacks(bytes: Buffer): boolean {
+  let videoPackets = 0;
+  for (let sector = 0; sector < bytes.length; sector += 2048) {
+    const end = sector + 2048;
+    if (bytes.readUInt32BE(sector) !== 0x000001ba || (bytes[sector + 4]! & 0xc0) !== 0x40) return false;
+    let offset = sector + 14 + (bytes[sector + 13]! & 7);
+    while (offset < end) {
+      if (offset + 6 > end || bytes.readUIntBE(offset, 3) !== 1) return false;
+      const stream = bytes[offset + 3]!, length = bytes.readUInt16BE(offset + 4);
+      if (length === 0 || offset + 6 + length > end ||
+          !(stream === 0xbb || stream === 0xbd || stream === 0xbe || stream === 0xbf || (stream >= 0xc0 && stream <= 0xef))) return false;
+      if (stream === 0xbd || (stream >= 0xc0 && stream <= 0xef)) {
+        if (length < 3 || (bytes[offset + 6]! & 0xf0) !== 0x80 || bytes[offset + 8]! > length - 3) return false;
+        if (stream >= 0xe0) videoPackets++;
+      }
+      offset += 6 + length;
+    }
+  }
+  return videoPackets > 0;
+}
 
 /** Bounded content identity, checked while the inspection's file fence is held. */
 export async function hashEncodeOutputBytes(path: string, signal: AbortSignal): Promise<string | null> {
@@ -149,6 +179,7 @@ export async function measureEncodeSourceCell(
       if (!sameEncodeOutputMutationSnapshot(before, await image.stat()) ||
           !sameEncodeOutputMutationSnapshot(before, await lstat(imagePath))) throw new Error("Source changed");
     } finally { await image.close(); }
+    if (!completeClearDvdPacks(bytes)) return unknown("OUTPUT_CELL_UNSUPPORTED");
     const path = join(directory, "cell.mpg");
     await writeFile(path, bytes, { mode: 0o600, flag: "wx" });
     const video = await decodeVideo(path, ownership.signal, tool);

@@ -41,18 +41,19 @@ linux("reaches measured correspondence with the real supported HandBrake preset 
   } finally { seeded.access.close(); }
 }, 120_000);
 
-linux.each(["shifted", "repeated", "omitted", "truncated"] as const)("measures actual synthetic %s media through the producer and both operator adapters", async (kind) => {
+linux.each(["shifted", "shifted_pts", "repeated", "omitted", "truncated"] as const)("measures actual synthetic %s media through the producer and both operator adapters", async (kind) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const input = join(fixture.operatorHostPath, "synthetic-cell.mpg"); sourceMedia(input);
   const seeded = await seedCorrespondenceClaim(fixture, { sharedSource: true, singleCell: { imageContents: readFileSync(input) } });
   try {
     // Lossless encoding here isolates measured content and timestamp behavior.
     // The separate real worker test proves the production preset can reach it.
-    const filter = kind === "shifted" ? "[0:v]setpts=PTS-STARTPTS,tpad=start_duration=1:color=red[v]"
+    const filter = kind === "shifted" || kind === "shifted_pts" ? `[0:v]setpts=PTS-STARTPTS,tpad=start_duration=1:color=red${kind === "shifted_pts" ? ",settb=1/1000,setpts=PTS+21" : ""}[v]`
       : kind === "repeated" ? "[0:v]setpts=PTS-STARTPTS,split[a][b];[a][b]concat=n=2:v=1:a=0[v]"
       : kind === "omitted" ? "[0:v]select='lt(t,1)+gte(t,2)',setpts=N/(25*TB)[v]"
       : "[0:v]trim=duration=2,setpts=PTS-STARTPTS[v]";
-    tool("ffmpeg", ["-v", "error", "-y", "-i", input, "-filter_complex", filter, "-map", "[v]", "-an", "-c:v", "ffv1", seeded.claim.outputPath]);
+    tool("ffmpeg", ["-v", "error", "-y", "-i", input, "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=6",
+      "-filter_complex", filter, "-map", "[v]", "-map", "1:a:0", "-c:a", "pcm_s16le", "-c:v", "ffv1", "-enc_time_base", "1:1000", seeded.claim.outputPath]);
     const snapshot = seeded.access.encodeJobs.findClaimSnapshot(seeded.claim.claimToken)!;
     const source = await createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }).withConsistentRead({
       archiveId: seeded.archive.id, imagePath: seeded.archive.archivePath, originalsLibraryPath: fixture.originalsLibraryPath,
@@ -65,8 +66,10 @@ linux.each(["shifted", "repeated", "omitted", "truncated"] as const)("measures a
     const cli = await fixture.run(["encode-output", "intervals", identity, "--json", JSON.stringify(query)]);
     const web = await createEncodeOutputIntervalsRoute(new Request(`http://localhost/api/encode-outputs/${identity}/intervals?query=${encodeURIComponent(JSON.stringify(query))}`), identity, () => seeded.access);
     expect(cli.result).toEqual(await web.json());
-    expect(cli).toMatchObject({ exitCode: 0, result: { intervals: [{ status: kind === "shifted" ? "verified" : "unknown" }] } });
-    if (kind === "shifted") expect(cli.result).toMatchObject({ intervals: [{ outputInterval: { startMilliseconds: 1000, endMilliseconds: 5000 } }] });
+    expect(cli).toMatchObject({ exitCode: 0, result: { intervals: [{ status: kind.startsWith("shifted") ? "verified" : "unknown" }] } });
+    if (kind.startsWith("shifted")) expect(cli.result).toMatchObject({ intervals: [{ outputInterval: {
+      startMilliseconds: kind === "shifted_pts" ? 1021 : 1000, endMilliseconds: kind === "shifted_pts" ? 5021 : 5000,
+    } }] });
     else expect(cli.result).toMatchObject({ intervals: [{ outputInterval: null }], targetedLocation: { eligible: false, reasonCode: "OUTPUT_MAPPING_UNKNOWN" } });
   } finally { seeded.access.close(); }
 }, 120_000);
