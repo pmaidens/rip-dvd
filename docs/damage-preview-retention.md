@@ -41,11 +41,12 @@ The current proved equivalence has two bounded differences:
   A chapter subset remains unproved because the producer records no chapter-time
   map. This proves source selection containment, not a damage seek or playback.
 - The normal output's versioned `encode-claim-output-v1` policy includes all
-  source audio/subtitles without subtitle burn. A preview may choose a subset
-  from those same recorded streams. Selected audio must also occur in the
-  validation's output source IDs, and validation must have checked the complete
-  expected subtitle inventory. Additional output tracks do not replace a
-  selected preview stream. The recorded format, preset, navigation mode and
+  source audio/subtitles without subtitle burn. A preview may choose an audio
+  subset from those same recorded streams. Selected audio must also occur in
+  the validation's output source IDs. Previews with selected subtitles remain
+  protected because successful validation can remove empty subtitle tracks and
+  does not record surviving source subtitle IDs. Additional output tracks do not
+  replace a selected preview stream. The recorded format, preset, navigation mode and
   concrete title/angle/chapter arguments must match the intended settings.
 
 A matching proof satisfies only the finished-output condition. Active Catalog
@@ -85,7 +86,10 @@ two conditions. Both reject a stale media token without deleting files.
 Reusing the same key and input returns the saved outcome; changed input
 conflicts. Deletion does not cancel generation or change damage acceptance.
 
-Removal saves a durable intent before deleting files. After an interrupted
+Filesystem observations and response projection run outside SQLite writer
+transactions. Admission rechecks preview metadata, current review state and the
+recorded output authority using the staged observations. Actual unlink also
+checks the admitted preview file identity. Removal saves a durable intent before deleting files. After an interrupted
 removal, replaying its invocation or restarting the preview cleanup loop
 finishes that intent. Removal failures preserve their outcomes and stop
 automatic retries. An operator can inspect, correct the filesystem problem,

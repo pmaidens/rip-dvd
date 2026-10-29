@@ -13,7 +13,7 @@ const day = 24 * 60 * 60 * 1_000;
 afterEach(() => { vi.useRealTimers(); fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
 async function setup(options?: Parameters<typeof seedProvedPreviewOutput>[1]) {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
-  return { fixture, ...await seedProvedPreviewOutput(fixture, options) };
+  return seedProvedPreviewOutput(fixture, options);
 }
 
 it("releases a current sample only after exact-generation source acknowledgement, then expires it at 30 idle days with durable replay", async () => {
@@ -49,6 +49,31 @@ it("protects a current preview when the acknowledged output used different versi
   const { inspectPreview, acknowledge } = await setup({ differentProfile: true });
   await acknowledge("synthetic-mismatched-settings-ack");
   expect(await inspectPreview()).toMatchObject({ outdated: false, finishedOutputInspection: { retentionSatisfied: false, outputs: [{ acknowledgementStatus: "acknowledged", reasonCode: "FINISHED_OUTPUT_SOURCE_MISMATCH" }] }, media: { retention: { protectedForReview: true, reasonCodes: ["FINISHED_OUTPUT_SOURCE_MISMATCH"] } } });
+});
+
+it("keeps selected subtitles protected when passing validation could have removed an empty track", async () => {
+  const { inspectPreview, acknowledge, inspectOutput } = await setup({ selectedSubtitle: true });
+  await acknowledge("synthetic-subtitle-survival-unknown");
+  expect((await inspectOutput()).artifact).toMatchObject({ validation: { result: "passed", checks: { subtitles: { expectedSourceStreams: 1, checked: true } } }, provenance: { sourceSnapshot: { source: { output: { subtitleStreams: [{ id: 32 }] } } } } });
+  expect(await inspectPreview()).toMatchObject({ outdated: false, provenance: { streams: { subtitles: [32] } }, finishedOutputInspection: { retentionSatisfied: false, outputs: [{ acknowledgementStatus: "acknowledged", reasonCode: "FINISHED_OUTPUT_SUBTITLE_UNPROVED" }] }, media: { retention: { protectedForReview: true } } });
+});
+
+it("rejects changed output authority between staged source proof and cleanup admission", async () => {
+  const { fixture, id, path, claim, inspectPreview, acknowledge } = await setup();
+  await acknowledge("synthetic-before-admission-proof-change");
+  const current = await inspectPreview();
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(current.updatedAt) + 31 * day);
+  const access = fixture.openAccess();
+  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
+  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, (record) => {
+    const staged = prepare(record);
+    const db = new DatabaseSync(fixture.databasePath);
+    try { db.prepare("UPDATE encode_jobs SET output_validated_at = output_validated_at + 1 WHERE id = ?").run(claim.id); } finally { db.close(); }
+    return staged;
+  }, remove, present);
+  expect(await fixture.run(["damage-preview", "cleanup", id, "--key", "synthetic-staged-proof-change", "--json", JSON.stringify({ mediaToken: current.media.token })], undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_STALE" } } });
+  expect(existsSync(path)).toBe(true);
+  expect((await inspectPreview()).media.removal).toBeNull();
 });
 
 it("requires passing validation recorded by the receipt and never upgrades an acknowledgement of unknown validation", async () => {

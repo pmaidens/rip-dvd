@@ -10,7 +10,6 @@ import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damag
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
 import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia, type previewMediaTargets } from "./damage-preview-media-state.js";
 import { inspectDamagePreviewOutputAcknowledgements, type DamagePreviewFinishedOutputInspection } from "./damage-preview-output-inspection.js";
-import type { EncodeOutputMediaProbe } from "./encode-output-inspection.js";
 
 type Review = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
 export class DamagePreviewRejectedError extends Error {
@@ -106,7 +105,7 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
   if (record === null) record = submit(null);
   return presentDamagePreview(record);
 }
-export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord, mediaTargets?: ReturnType<typeof previewMediaTargets>, includeOutputInspection = false) {
+export function describeDamagePreview(access: DataAccess, record: DamagePreviewRecord, mediaTargets?: ReturnType<typeof previewMediaTargets>, includeOutputInspection = false, outputInspection?: DamagePreviewFinishedOutputInspection | null) {
   const original = JSON.parse(record.reviewJson) as Review;
   const saved = original.reviewedRequest!.checkpoint!;
   const current = access.readConsistentSnapshot((snapshot) => reviewDamagePreviewEvidence(snapshot, record.originalDiscArchiveId, parseDamagePreviewInput(JSON.parse(record.selectionJson)), {
@@ -118,10 +117,10 @@ export function describeDamagePreview(access: DataAccess, record: DamagePreviewR
     (JSON.parse(candidate.reviewJson) as Review).reviewedRequest?.title?.titleIdentityId === originalTitle).at(-1);
   const superseded = newerIntent !== undefined && previewMediaInputs(JSON.parse(newerIntent.reviewJson) as Review) !== previewMediaInputs(original);
   const outdated = superseded || previewMediaInputs(current) !== previewMediaInputs(original);
-  const finishedOutputInspection = inspectDamagePreviewOutputAcknowledgements(access, record);
+  const finishedOutputInspection = outputInspection === undefined ? inspectDamagePreviewOutputAcknowledgements(access, record) : outputInspection;
   return { ...presentDamagePreview(record, { outdated, retention: damagePreviewRetention(access, record, outdated, finishedOutputInspection), mediaTargets }), finishedOutputInspection: includeOutputInspection ? finishedOutputInspection : null };
 }
-export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership, _mediaProbe?: EncodeOutputMediaProbe) {
+export async function inspectDamagePreview(access: DataAccess, id: string, _ownership?: ArchiveImageOwnership) {
   return describeDamagePreview(access, requiredRecord(access, id), undefined, true);
 }
 export function cancelDamagePreview(access: DataAccess, id: string, mutationKey: unknown) {

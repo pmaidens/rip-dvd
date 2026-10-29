@@ -1,9 +1,10 @@
 import { closeSync, constants, fsyncSync, lstatSync, openSync, realpathSync, unlinkSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import type { DataAccess, DamagePreviewRecord, DamagePreviewMediaRemoval } from "@rip-dvd/data-access";
+import { canonicalPublicationJson, type DataAccess, type DamagePreviewRecord, type DamagePreviewMediaRemoval } from "@rip-dvd/data-access";
 import { InvalidDamagePreviewInputError } from "./damage-preview-input.js";
 import { DamagePreviewRejectedError, describeDamagePreview } from "./damage-preview-operations.js";
 import { DAMAGE_PREVIEW_IDLE_MS, previewGenerationActive, previewMediaFileObservation, previewMediaTargets } from "./damage-preview-media-state.js";
+import { observeDamagePreviewOutputAcknowledgements } from "./damage-preview-output-inspection.js";
 import { parseMutationKey } from "./mutation-key.js";
 
 function synchronizeRemovalDirectory(directory: string) {
@@ -48,14 +49,37 @@ export function removeDamagePreviewMedia(access: DataAccess, id: string, raw: un
   const input = raw as Record<string, unknown>;
   const mutationKey = parseMutationKey(input.mutationKey);
   if (typeof input.mediaToken !== "string" || input.mediaToken.length > 256) throw new InvalidDamagePreviewInputError("A reviewed media token is required.");
-  const result = access.damagePreviews.removeMedia({ id, mutationKey, mediaToken: input.mediaToken, cause }, (record) => {
-    const targets = previewMediaTargets(record);
-    const current = describeDamagePreview(access, record, targets);
-    if (current.media.token !== input.mediaToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_STALE", [{ code: "DAMAGE_PREVIEW_MEDIA_STALE", message: "Review the current preview media before removing it." }], current);
-    if (!current.media.deletion.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", current.media.deletion.reasons, current);
-    if (cause === "idle_cleanup" && !current.media.cleanup.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_CLEANUP_UNAVAILABLE", current.media.cleanup.reasons, current);
-    return targets.map(({ identity, observation }) => ({ identity, filesystemIdentity: observation.filesystemIdentity }));
-  }, removeFiles, (record) => describeDamagePreview(access, record));
+  let result: ReturnType<typeof describeDamagePreview>;
+  try {
+    result = access.damagePreviews.removeMedia({ id, mutationKey, mediaToken: input.mediaToken, cause }, (record) => {
+      const targets = previewMediaTargets(record);
+      const output = observeDamagePreviewOutputAcknowledgements(access, record);
+      const originalRecord = canonicalPublicationJson(record);
+      const check = (current: ReturnType<typeof describeDamagePreview>) => {
+        if (current.media.token !== input.mediaToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_STALE", [{ code: "DAMAGE_PREVIEW_MEDIA_STALE", message: "Review the current preview media before removing it." }], current);
+        if (!current.media.deletion.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", current.media.deletion.reasons, current);
+        if (cause === "idle_cleanup" && !current.media.cleanup.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_CLEANUP_UNAVAILABLE", current.media.cleanup.reasons, current);
+      };
+      check(describeDamagePreview(access, record, targets, false, output.inspection));
+      return {
+        expectedFiles: targets.map(({ identity, observation }) => ({ identity, filesystemIdentity: observation.filesystemIdentity })),
+        assertCurrent(currentRecord) {
+          if (canonicalPublicationJson(currentRecord) !== originalRecord || !output.isCurrent()) {
+            throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_STALE", [{ code: "DAMAGE_PREVIEW_MEDIA_STALE", message: "Preview media or its retention evidence changed before deletion admission." }]);
+          }
+          // All filesystem observations are staged. Only database state is read
+          // while the durable intent and invocation are admitted atomically.
+          check(describeDamagePreview(access, currentRecord, targets, false, output.inspection));
+        },
+      };
+    }, removeFiles, (record) => describeDamagePreview(access, record));
+  } catch (error) {
+    if (error instanceof DamagePreviewRejectedError && error.current === null) {
+      const current = access.damagePreviews.find(id);
+      throw new DamagePreviewRejectedError(error.code, error.reasons, current ? describeDamagePreview(access, current) : null);
+    }
+    throw error;
+  }
   if (result.media.state === "removal_failed") throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", [{ code: "DAMAGE_PREVIEW_MEDIA_REMOVAL_FAILED", message: "Some media could not be removed. Review the durable outcomes before retrying with a new key." }], result);
   return result;
 }

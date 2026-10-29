@@ -46,6 +46,41 @@ it("replays the original cancellation response after separate media deletion", a
   expect(await inspect()).toMatchObject({ media: { state: "removed", removal: { cause: "explicit_deletion" } } });
 });
 
+it("leaves the database writer available during cancellation and deletion filesystem observations", async () => {
+  const { fixture, id, path, inspect } = await setup();
+  const token = (await inspect()).media.token;
+  const other = new DatabaseSync(fixture.databasePath);
+  const original = fs.lstatSync;
+  let blocked = false;
+  vi.spyOn(fs, "lstatSync").mockImplementation(((...args: unknown[]) => {
+    if (args[0] === path) {
+      try { other.exec("BEGIN IMMEDIATE"); other.exec("ROLLBACK"); } catch { blocked = true; }
+    }
+    return Reflect.apply(original, fs, args);
+  }) as typeof fs.lstatSync);
+  syncBuiltinESMExports();
+  try {
+    expect(await fixture.run(["damage-preview", "cancel", id, "--key", "synthetic-writer-free-cancel"])).toMatchObject({ exitCode: 0 });
+    expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-writer-free-delete", "--json", JSON.stringify({ mediaToken: token })])).toMatchObject({ exitCode: 0 });
+    expect(blocked).toBe(false);
+  } finally { other.close(); }
+});
+
+it("rejects changed preview metadata after filesystem preparation without removing media", async () => {
+  const { fixture, id, path, inspect } = await setup();
+  const token = (await inspect()).media.token;
+  const access = fixture.openAccess();
+  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
+  access.damagePreviews.removeMedia = (input, prepare, remove, present) => removeMedia(input, (record) => {
+    const staged = prepare(record);
+    access.damagePreviews.touchMedia(record.id);
+    return staged;
+  }, remove, present);
+  expect(await fixture.run(["damage-preview", "delete", id, "--key", "synthetic-staged-media-change", "--json", JSON.stringify({ mediaToken: token })], undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 2, result: { error: { code: "DAMAGE_PREVIEW_MEDIA_STALE" } } });
+  expect(existsSync(path)).toBe(true);
+  expect((await inspect()).media.removal).toBeNull();
+});
+
 it("upgrades a historical cancellation receipt once without changing later replay", async () => {
   const { fixture, id, inspect } = await setup();
   const key = "synthetic-historical-cancel";
@@ -168,6 +203,21 @@ it("resumes durable deletion after process death, including already missing file
   const after = await inspect();
   expect(after).toMatchObject({ media: { state: "removed", removal: { state: "complete", outcomes: [{ outcome: "already_missing" }] } }, provenance: before.provenance });
   expect(await fixture.run(args)).toMatchObject({ exitCode: 0, result: after });
+});
+
+it("replays a settled deletion after response projection fails without another filesystem mutation", async () => {
+  const { fixture, id, path, inspect } = await setup();
+  const token = (await inspect()).media.token;
+  const args = ["damage-preview", "delete", id, "--key", "synthetic-settled-response-loss", "--json", JSON.stringify({ mediaToken: token })];
+  const access = fixture.openAccess();
+  const removeMedia = access.damagePreviews.removeMedia.bind(access.damagePreviews);
+  access.damagePreviews.removeMedia = (input, prepare, remove) => removeMedia(input, prepare, remove, () => { throw new Error("Synthetic process death before response projection"); });
+  expect(await fixture.run(args, undefined, undefined, { openAccess: () => access })).toMatchObject({ exitCode: 1 });
+  expect(existsSync(path)).toBe(false);
+  expect((await inspect()).media.removal?.state).toBe("complete");
+  const first = await fixture.run(args);
+  expect(first).toMatchObject({ exitCode: 0, result: { media: { removal: { outcomes: [{ outcome: "removed" }] } } } });
+  expect(await fixture.run(args)).toEqual(first);
 });
 
 it("rejects a substituted symlink without following it, and permits reviewed deletion after it is removed", async () => {

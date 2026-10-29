@@ -2,7 +2,7 @@ import { canonicalPublicationJson, type DamagePreviewRecord } from "@rip-dvd/dat
 import type { reviewDamagePreviewEvidence } from "./damage-preview.js";
 import type { EncodeOutputInspectionReceipt, inspectEncodeOutputIdentity } from "./encode-output-inspection.js";
 
-export type FinishedOutputProofReason = "FINISHED_OUTPUT_SOURCE_NOT_RECORDED" | "FINISHED_OUTPUT_SOURCE_MISMATCH" | "FINISHED_OUTPUT_VALIDATION_UNPROVED";
+export type FinishedOutputProofReason = "FINISHED_OUTPUT_SOURCE_NOT_RECORDED" | "FINISHED_OUTPUT_SOURCE_MISMATCH" | "FINISHED_OUTPUT_VALIDATION_UNPROVED" | "FINISHED_OUTPUT_SUBTITLE_UNPROVED";
 
 const equal = (left: unknown, right: unknown) => canonicalPublicationJson(left) === canonicalPublicationJson(right);
 
@@ -48,5 +48,8 @@ export function previewOutputSourceProof(record: DamagePreviewRecord, receipt: E
     preview.streams.audio.every((id) => output.audioStreams.some((stream) => stream.id === id) && validation.checks!.audio.outputSourceIds?.includes(id)) &&
     preview.streams.subtitles.every((id) => output.subtitleStreams.some((stream) => stream.id === id)) &&
     validation.checks.subtitles.checked && validation.checks.subtitles.expectedSourceStreams === output.subtitleStreams.length;
-  return matches ? null : "FINISHED_OUTPUT_SOURCE_MISMATCH";
+  if (!matches) return "FINISHED_OUTPUT_SOURCE_MISMATCH";
+  // Passing validation may remove empty subtitle tracks. Its expected count
+  // does not identify surviving source IDs. Preserve selected-subtitle samples.
+  return preview.streams.subtitles.length > 0 ? "FINISHED_OUTPUT_SUBTITLE_UNPROVED" : null;
 }

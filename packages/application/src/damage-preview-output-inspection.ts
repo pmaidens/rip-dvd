@@ -21,6 +21,11 @@ export interface DamagePreviewFinishedOutputInspection {
 }
 
 export function inspectDamagePreviewOutputAcknowledgements(access: DataAccess, record: DamagePreviewRecord): DamagePreviewFinishedOutputInspection | null {
+  return observeDamagePreviewOutputAcknowledgements(access, record).inspection;
+}
+
+export function observeDamagePreviewOutputAcknowledgements(access: DataAccess, record: DamagePreviewRecord): { inspection: DamagePreviewFinishedOutputInspection | null; isCurrent(): boolean } {
+  const authorityChecks: (() => boolean)[] = [];
   const archiveId = record.originalDiscArchiveId;
   const candidates = access.readConsistentSnapshot((snapshot) => {
     // Mutable catalog links discover candidates only. They never prove that
@@ -39,7 +44,7 @@ export function inspectDamagePreviewOutputAcknowledgements(access: DataAccess, r
     truncated ||= retained.nextOffset !== null;
     references.push(...encodeOutputArtifactReferences(job, links, retained.outputs));
   }
-  if (references.length === 0 && !truncated) return null;
+  if (references.length === 0 && !truncated) return { inspection: null, isCurrent: () => true };
   truncated ||= references.length > OUTPUT_LIMIT;
   const outputs: OutputAcknowledgement[] = [];
   for (const reference of references.slice(0, OUTPUT_LIMIT)) {
@@ -48,6 +53,7 @@ export function inspectDamagePreviewOutputAcknowledgements(access: DataAccess, r
       const { generationIdentity, status, receipts } = inspected.operatorInspection;
       const available = inspected.artifact.file.status === "available" && inspected.artifact.file.identityContinuity === "verified";
       const proof = receipts.map((receipt) => previewOutputSourceProof(record, receipt, inspected.artifact));
+      if (available && proof.includes(null)) authorityChecks.push(inspected.isCurrent);
       outputs.push({
         artifactIdentity: inspected.artifact.identity, generationIdentity, acknowledgementStatus: available ? status : "unavailable",
         matchingReceipts: available ? receipts : [],
@@ -59,5 +65,5 @@ export function inspectDamagePreviewOutputAcknowledgements(access: DataAccess, r
     }
   }
   const retentionSatisfied = outputs.some((output) => output.reasonCode === null);
-  return { state: retentionSatisfied ? "proved" : "unproved", retentionSatisfied, discovery: "bounded_current_catalog", truncated, outputs };
+  return { inspection: { state: retentionSatisfied ? "proved" : "unproved", retentionSatisfied, discovery: "bounded_current_catalog", truncated, outputs }, isCurrent: () => authorityChecks.every((check) => check()) };
 }

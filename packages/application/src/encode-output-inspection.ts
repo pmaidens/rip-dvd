@@ -994,7 +994,22 @@ export async function inspectEncodeOutput(
 export function inspectEncodeOutputIdentity(access: DataAccess, artifactIdentity: string) {
   const parsed = parseEncodeOutputArtifactIdentity(artifactIdentity);
   const base = resolveEncodeOutputAuthority(access, parsed);
-  const present = (inspected: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) => withInspectionReceipts(access, inspected, 1, 0);
+  const present = (inspected: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) => {
+    const result = withInspectionReceipts(access, inspected, 1, 0);
+    return { ...result, isCurrent() {
+      // Database-only authority recheck for a surrounding admission transaction.
+      // The observed file metadata was captured before taking its writer lock.
+      try {
+        const current = resolveEncodeOutputAuthority(access, parsed);
+        const evidence = inspectionResponse(current, inspected.artifact.file,
+          unknownInspection("OUTPUT_PROBE_NOT_REQUESTED", "This identity check does not probe playback metadata."));
+        return canonicalPublicationJson(withInspectionReceipts(access, evidence, 1, 0)) === canonicalPublicationJson(result);
+      } catch (error) {
+        if (error instanceof RecordNotFoundError) return false;
+        throw error;
+      }
+    } };
+  };
   if (base.authorityUnavailableReason !== null) return present(fileUnavailable(base, "OUTPUT_AUTHORITY_CHANGED", base.authorityUnavailableReason));
   let metadata: Stats;
   try { metadata = lstatSync(base.outputPath); }

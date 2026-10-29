@@ -16,7 +16,8 @@ export const syntheticOutputValidation = {
 
 /** Stand in for validated worker publication, keeping the real ownership transaction. */
 export function publishSyntheticClaim(access: DataAccess, claim: RunningEncodeJob, retainPrevious = false,
-  measured?: { evidence: EncodeOutputValidationEvidence; preserveOutput: true }) {
+  options: EncodeOutputValidationEvidence | { evidence: EncodeOutputValidationEvidence; preserveOutput: true } = syntheticOutputValidation) {
+  const evidence = "evidence" in options ? options.evidence : options;
   const retainedPath = retainPrevious ? join(realpathSync(dirname(claim.outputPath)), `${basename(claim.outputPath)}.failed.${claim.claimToken}`) : undefined;
   if (retainedPath !== undefined) {
     access.encodeJobs.recordReplacementOutputIdentity(claim, encodeOutputFilesystemIdentity(lstatSync(claim.outputPath)));
@@ -24,13 +25,13 @@ export function publishSyntheticClaim(access: DataAccess, claim: RunningEncodeJo
   const cleanup = access.encodeJobs.registerPartialCleanup(claim, { publicationPending: true });
   const mutation = access.encodeJobs.beginPublicationMutation(claim, cleanup, retainedPath);
   if (retainedPath !== undefined) renameSync(claim.outputPath, retainedPath);
-  if (!measured?.preserveOutput) writeFileSync(claim.outputPath, `synthetic generation ${claim.claimToken}`);
+  if (!("preserveOutput" in options && options.preserveOutput)) writeFileSync(claim.outputPath, `synthetic generation ${claim.claimToken}`);
   const filesystemIdentity = encodeOutputFilesystemIdentity(lstatSync(claim.outputPath));
   const source = access.encodeJobs.findClaimSnapshot(claim.claimToken)?.source;
-  const expectedSeconds = source === undefined ? syntheticOutputValidation.duration.expectedSeconds : source.output.expectedDurationSeconds;
+  const expectedSeconds = source === undefined ? evidence.duration.expectedSeconds : source.output.expectedDurationSeconds;
   const validation = access.encodeJobs.recordOutputValidation(claim, filesystemIdentity, {
-    ...(measured?.evidence ?? syntheticOutputValidation),
-    duration: { ...syntheticOutputValidation.duration, expectedSeconds, minimumRatio: expectedSeconds === null ? null : 0.98 },
+    ...evidence,
+    duration: { ...evidence.duration, expectedSeconds, minimumRatio: expectedSeconds === null ? null : 0.98 },
   });
   access.encodeJobs.completePublishedClaim(claim, mutation, () => true, {
     ...(retainedPath === undefined ? {} : { retainedOutputPath: retainedPath,
