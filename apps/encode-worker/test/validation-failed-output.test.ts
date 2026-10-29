@@ -23,7 +23,7 @@ vi.mock("node:fs", async (original) => {
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => { fault.storage = false; fault.rewrite = false; fixtures.splice(0).forEach((fixture) => fixture.dispose()); });
 
-it.each(["validation", "interrupted", "writer_failed", "changed_bytes", "changed_inode", "changed_during_sync", "normal_changed", "lost_claim", "storage", "probe_storage", "probe_storage_stderr", "active_writer"])(
+it.each(["validation", "interrupted", "writer_failed", "changed_bytes", "changed_inode", "changed_during_sync", "normal_changed", "lost_claim", "storage", "probe_storage", "probe_storage_stderr", "probe_device_loss", "probe_device_address_loss", "active_writer"])(
   "retains only a complete owned validation failure at the %s boundary", async (failure) => {
     const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
     const { predecessor, archive } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic existing normal output" });
@@ -48,9 +48,10 @@ it.each(["validation", "interrupted", "writer_failed", "changed_bytes", "changed
           if (failure === "interrupted") { controller.abort(); throw new Error("Synthetic process interruption"); }
           if (failure === "writer_failed") throw new Error("Synthetic incomplete write");
         }, isActive: () => failure === "active_writer" },
-        outputValidator: failure === "probe_storage_stderr" ? createNodeEncodeOutputValidator({ runMediaTool: async () => ({
-          stdout: JSON.stringify({ streams: [] }), stderr: "Input/output error",
-        }) }) : { prepareAndValidate: async (path) => {
+        outputValidator: ["probe_storage_stderr", "probe_device_loss", "probe_device_address_loss"].includes(failure) ? createNodeEncodeOutputValidator({ runMediaTool: async () => {
+          if (failure !== "probe_storage_stderr") throw Object.assign(new Error(failure === "probe_device_loss" ? "No such device" : "No such device or address"), { code: 1 });
+          return { stdout: JSON.stringify({ streams: [] }), stderr: "Input/output error" };
+        } }) : { prepareAndValidate: async (path) => {
           if (failure === "changed_bytes") writeFileSync(path, "synthetic changed validation bytes");
           if (failure === "changed_inode") { writeFileSync(`${path}.replacement`, "synthetic replaced output"); renameSync(`${path}.replacement`, path); }
           if (failure === "normal_changed") writeFileSync(predecessor.outputPath, "synthetic changed normal output");

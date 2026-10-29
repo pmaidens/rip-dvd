@@ -112,10 +112,17 @@ describe("encode output validation", () => {
     await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
   });
 
-  it("rejects successful media-tool exit with storage-fault stderr without retention eligibility", async () => {
+  it.each(["Input/output error", "No such device", "No such device or address"])("rejects successful media-tool exit with storage-fault stderr %s", async (diagnostic) => {
     const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => ({
-      stdout: JSON.stringify({ streams: [] }), stderr: "Input/output error",
+      stdout: JSON.stringify({ streams: [] }), stderr: diagnostic,
     }) });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
+  });
+
+  it.each(["No such device", "No such device or address"])("rejects numeric subprocess failure reporting %s without retention eligibility", async (diagnostic) => {
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => {
+      throw Object.assign(new Error(diagnostic), { code: 1 });
+    } });
     await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal)).rejects.toMatchObject({ retentionSafe: false });
   });
 

@@ -130,7 +130,7 @@ function validationError(
 function storageFault(error: unknown): boolean {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
   return ["EIO", "ENOSPC", "EDQUOT", "EROFS", "ESTALE", "ENODEV", "ENXIO"].includes(code) ||
-    /input\/output error|no space left|disk quota exceeded|read-only file system|stale file handle/i.test(normalizeToolError(error));
+    /input\/output error|no space left|disk quota exceeded|read-only file system|stale file handle|no such device(?: or address)?/i.test(normalizeToolError(error));
 }
 
 function normalizeToolError(error: unknown): string {
