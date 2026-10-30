@@ -93,6 +93,9 @@ it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true").each([
     const mediaPath = record.media!.path;
     const output = await probeEncodeOutputMedia(mediaPath);
     expect(output.streams.map((stream) => stream.codecName)).toEqual(["h264", "aac"]);
+    const audioProbe = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=channels", "-of", "json", mediaPath], { encoding: "utf8" })) as { streams: { channels: number }[] };
+    // These synthetic sources are mono. Copy preserves mono; conversion emits stereo.
+    expect(audioProbe.streams.map((stream) => stream.channels)).toEqual([variant === "video_format" ? 1 : 2]);
     execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-ss", "1.5", "-i", mediaPath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"], { stdio: "pipe" });
     const audio = execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-i", mediaPath, "-map", "0:a:0", "-f", "s16le", "-"], { maxBuffer: 2_000_000 });
     expect(audio.some((byte) => byte !== 0)).toBe(true);

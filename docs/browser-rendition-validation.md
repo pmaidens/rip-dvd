@@ -23,8 +23,9 @@ omitted DVD bitmap and text subtitles, and each subtitle burned separately.
 The synthetic bitmap fixture starts as a generated PGS rectangle and is encoded
 to DVD subtitles. Text captions use generated SRT. Pixel checks compare black
 frames before/after captions with the visible burned caption interval. Audio
-must decode to nonzero samples, seeking must decode a frame, output codecs and
-duration must match the plan, and canonical export must preserve source bytes.
+must decode to nonzero samples, converted audio must be stereo while copied
+mono audio stays mono, seeking must decode a frame, output codecs and duration
+must match the plan, and canonical export must preserve source bytes.
 An actual FFmpeg process failure must persist a stable conversion failure without
 playable media.
 

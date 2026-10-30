@@ -12,7 +12,7 @@ it("admits probed incompatible streams with durable codec and format differences
   expect(seeded.review).toMatchObject({ available: true, conversion: { kind: "h264_aac_transcode", copiedStreamIndexes: [],
     streams: [
       { sourceIndex: 0, outputIndex: 0, sourceCodec: "mpeg2video", codec: "h264", mode: "transcode" },
-      { sourceIndex: 1, outputIndex: 1, sourceCodec: "ac3", codec: "aac", mode: "transcode", language: "eng" },
+      { sourceIndex: 1, outputIndex: 1, sourceCodec: "ac3", codec: "aac", mode: "transcode", language: "eng", differences: ["AAC-LC", "Stereo audio", "48 kHz", "192 kbit/s"] },
     ] } });
   const inspected = await fixture.run(["encode-output", "inspect-rendition", seeded.request.id]);
   expect(inspected.result).toEqual(seeded.request);

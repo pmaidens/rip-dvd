@@ -86,7 +86,7 @@ it("reviews the chosen subtitle before submitting a separate burned rendition an
     { index: 2, kind: "subtitle", codecName: "dvd_subtitle", language: "eng", title: "Synthetic captions" },
   ] } };
   const conversion = (burned: boolean) => ({ kind: "h264_aac_transcode", subtitles: burned ? "burned_in" : "omitted", omittedStreamIndexes: burned ? [] : [2],
-    streams: [{ sourceIndex: 1, outputIndex: 1, kind: "audio", sourceCodec: "ac3", codec: "aac", mode: "transcode", language: "eng", title: "Synthetic audio", differences: ["Stereo downmix"] }],
+    streams: [{ sourceIndex: 1, outputIndex: 1, kind: "audio", sourceCodec: "ac3", codec: "aac", mode: "transcode", language: "eng", title: "Synthetic audio", differences: ["Stereo audio"] }],
     burnedSubtitle: burned ? { sourceIndex: 2, codecName: "dvd_subtitle", language: "eng", title: "Synthetic captions" } : null });
   let submitted: unknown;
   vi.stubGlobal("fetch", async (url: string, options?: { method?: string; body?: string }) => {
@@ -110,7 +110,7 @@ it("reviews the chosen subtitle before submitting a separate burned rendition an
     await act(async () => button("Create browser rendition").click());
     expect(submitted).toMatchObject({ reviewToken: "selected-subtitle-token", burnSubtitleIndex: 2, mutationKey: expect.any(String) });
     expect(container.textContent).toContain("Observed rendition audio: #1 aac, eng");
-    expect(container.textContent).toContain("ac3 to aac, converted. Stereo downmix");
+    expect(container.textContent).toContain("ac3 to aac, converted. Stereo audio");
     expect(container.textContent).toContain("Validation-failed source");
   } finally { await act(async () => root.unmount()); }
 });
