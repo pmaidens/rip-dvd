@@ -2,7 +2,8 @@
 
 import { createMutationKey } from "../lib/mutation-key";
 import { useEffect, useRef, useState } from "react";
-import type { BrowserRenditionAvailability, presentBrowserRendition } from "@rip-dvd/application";
+import type { BrowserRenditionAvailability, presentBrowserRendition, EncodeOutputInspection } from "@rip-dvd/application";
+import { EncodeOutputCorrespondence } from "./encode-output-correspondence";
 
 type Rendition = ReturnType<typeof presentBrowserRendition>;
 function streamLabel(stream: NonNullable<Rendition["source"]["media"]["streams"]>[number]) {
@@ -28,12 +29,14 @@ async function readResponse(response: Response) {
   if (!response.ok) throw new Error(body.error?.message ?? body.error?.code ?? "Browser playback is unavailable.");
   return body;
 }
-export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed, sourceAuthorityRevision, sourceFileMutationRevision }: { artifactIdentity: string; validationFailed: boolean; sourceAuthorityRevision: string; sourceFileMutationRevision: string | null }) {
+export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed, sourceAuthorityRevision, sourceFileMutationRevision, sourceSnapshot = null }: { artifactIdentity: string; validationFailed: boolean; sourceAuthorityRevision: string; sourceFileMutationRevision: string | null; sourceSnapshot?: EncodeOutputInspection["artifact"]["provenance"]["sourceSnapshot"] }) {
   const [availability, setAvailability] = useState<BrowserRenditionAvailability | null>(null);
   const [rendition, setRendition] = useState<Rendition | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [burnSubtitleIndex, setBurnSubtitleIndex] = useState("");
   const [busy, setBusy] = useState(false);
+  const video = useRef<HTMLVideoElement | null>(null);
+  const [seekMessage, setSeekMessage] = useState<{ renditionId: string; text: string } | null>(null);
   const submission = useRef<{ mutationKey: string; reviewToken: string; burnSubtitleIndex?: number } | null>(null);
   const selectedRequestId = useRef<string | null>(null);
   const latestRead = useRef(0);
@@ -72,7 +75,7 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
   };
   return <section aria-label="Browser Viewing Rendition">
     <h5>Browser Viewing Rendition</h5>
-    <p>Ordinary playback of a finished Encode Output. Source correspondence may be unknown. No damage seek is claimed.</p>
+    <p>Ordinary playback of a finished Encode Output. Source correspondence may be unknown. No damage seek is claimed by ordinary playback.</p>
     {validationFailed || rendition?.source.state === "validation_failed" ? <p role="alert">Validation-failed source. Viewing does not change Encode Job status, validate the output or record a Keep decision.</p> : null}
     <p>This separate MP4 copies compatible streams or converts video to H.264 and audio to AAC. Its conversion and subtitle choices do not replace the canonical MKV or establish watchability.</p>
     <a href="/viewing-access" target="_blank" rel="noreferrer">Sign in for browser playback</a>
@@ -103,8 +106,21 @@ export function EncodeOutputBrowserViewing({ artifactIdentity, validationFailed,
       {rendition.reason ? <p role="alert">{rendition.reason.message} [{rendition.reason.code}]</p> : null}
       <button type="button" onClick={() => { setError(null); void inspect(rendition.id); }}>Refresh rendition status</button>
       {rendition.media?.availability?.available === false ? <p role="alert">Rendition media is unavailable. [{rendition.media.availability.reasonCode}]</p> : null}
-      {rendition.status === "complete" && rendition.media && rendition.media.availability?.available !== false ? <video aria-label="Finished Encode Output browser rendition" controls playsInline preload="metadata" src={`/api/browser-renditions/${encodeURIComponent(rendition.id)}/media`} style={{ width: "100%", maxWidth: "60rem" }} onError={() => setError("The browser could not play this rendition. Its source validation status is unchanged.")} /> : null}
+      {rendition.status === "complete" && rendition.media && rendition.media.availability?.available !== false ? <video key={rendition.id} ref={video} aria-label="Finished Encode Output browser rendition" controls playsInline preload="metadata" src={`/api/browser-renditions/${encodeURIComponent(rendition.id)}/media`} style={{ width: "100%", maxWidth: "60rem" }} onError={() => { setSeekMessage(null); setError("The browser could not play this rendition. Its source validation status is unchanged."); }} /> : null}
     </> : null}
+    <EncodeOutputCorrespondence key={JSON.stringify([artifactIdentity, sourceAuthorityRevision, sourceFileMutationRevision, rendition?.id, rendition?.status, rendition?.media?.availability?.available])}
+      artifactIdentity={artifactIdentity} snapshot={sourceSnapshot} authorityRevision={sourceAuthorityRevision} fileMutationRevision={sourceFileMutationRevision}
+      renditionId={rendition?.status === "complete" && rendition.media && rendition.media.availability?.available !== false ? rendition.id : null}
+      onSeek={(target, mediaIdentity) => {
+        const player = video.current;
+        if (!player || rendition?.media?.identity !== mediaIdentity || player.readyState < 1 || !Number.isFinite(player.duration) || target.seekSeconds >= player.duration ||
+            !Array.from({ length: player.seekable.length }, (_, index) => index).some((index) => player.seekable.start(index) <= target.seekSeconds && player.seekable.end(index) > target.seekSeconds)) {
+          throw new Error("The proved target is not currently seekable in this browser. Load the rendition and try again; ordinary playback remains available.");
+        }
+        player.currentTime = target.seekSeconds;
+        setSeekMessage({ renditionId: rendition.id, text: `Seek requested at ${target.seekSeconds} seconds in the separate Browser Viewing Rendition. This does not acknowledge inspection or establish watchability.` });
+      }} />
+    {seekMessage?.renditionId === rendition?.id ? <p role="status">{seekMessage?.text}</p> : null}
     {error ? <p role="alert">{error}</p> : null}
   </section>;
 }

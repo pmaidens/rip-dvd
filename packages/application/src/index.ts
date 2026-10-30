@@ -500,7 +500,7 @@ export function createApplicationOperations(
         page,
       ),
     inspectEncodeOutputIntervals: (artifactIdentity: unknown, input: unknown) =>
-      inspectEncodeOutputIntervals(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
+      inspectEncodeOutputIntervals(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
     previewEncodeOutputKeep: (artifactIdentity: unknown, input?: unknown) =>
       previewEncodeOutputKeep(access, artifactIdentity, input, dependencies.encodeOutputMediaProbe),
     keepFailedEncodeOutput: (artifactIdentity: unknown, input: unknown) =>
@@ -1165,7 +1165,7 @@ export { InvalidEncodeOutputIntervalInputError } from "./encode-output-correspon
 export type { EncodeOutputIntervalInspection } from "./encode-output-correspondence.js";
 export { previewEncodeOutputKeep, InvalidEncodeOutputKeepPreflightInputError } from "./encode-output-keep-preflight.js";
 export type { EncodeOutputKeepPreflight } from "./encode-output-keep-preflight.js";
-export { measureEncodeSourceCell, measureEncodeOutputCell } from "./encode-output-cell-correspondence.js";
+export { measureEncodeSourceCell, measureEncodeOutputCell, measureBrowserRenditionTimeline } from "./encode-output-cell-correspondence.js";
 export type { EncodeSourceCellMeasurement, CorrespondenceMediaTool } from "./encode-output-cell-correspondence.js";
 export { keepFailedEncodeOutput, EncodeOutputKeepRejectedError, InvalidEncodeOutputKeepInputError } from "./encode-output-keep.js";
 export type { EncodeOutputKeepResult } from "./encode-output-keep.js";

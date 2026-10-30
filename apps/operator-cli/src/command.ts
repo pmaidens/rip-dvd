@@ -1786,6 +1786,7 @@ async function encodeOutputCommand(
   try {
     access = io.openAccess();
     const operations = createApplicationOperations(access, {
+      browserRenditionsEnabled: io.browserRenditionsEnabled,
       ...(io.encodeOutputMediaProbe === undefined
         ? {}
         : { encodeOutputMediaProbe: io.encodeOutputMediaProbe }),

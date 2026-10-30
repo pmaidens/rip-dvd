@@ -1,5 +1,17 @@
 import type { EncodeOutputFilesystemIdentity } from "./types.js";
 
+export type BrowserRenditionTimeline = {
+  policyVersion: "browser-rendition-exact-video-v1";
+} & ({
+  status: "verified";
+  canonicalBytesSha256: string;
+  renditionBytesSha256: string;
+  frames: {
+    canonical: { startMilliseconds: number; endMilliseconds: number };
+    rendition: { startMilliseconds: number; endMilliseconds: number };
+  }[];
+} | { status: "unknown"; reasonCode: "RENDITION_TIMELINE_UNVERIFIED" });
+
 export interface BrowserRenditionRecord {
   id: string;
   sourceIdentity: string;
@@ -22,6 +34,8 @@ export interface BrowserRenditionRecord {
   };
   command: string[];
   mediaProbeJson?: string | null;
+  // Historical renditions have no measured relationship to the canonical clock.
+  timeline?: BrowserRenditionTimeline;
   durationCoverage: { sourceSeconds: number; renditionSeconds: number | null; toleranceSeconds: number } | null;
   toolVersion: string | null;
   media: { identity: string; path: string; filesystemIdentity: EncodeOutputFilesystemIdentity; changeTimeMs: number; sizeBytes: number } | null;

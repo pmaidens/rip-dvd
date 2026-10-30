@@ -240,7 +240,7 @@ function EncodeOutputInspectionDetails({
       aria-label={`Encode Output ${artifact.identity}`}
     >
       <h4>Encode Output</h4>
-      <EncodeOutputBrowserViewing key={artifact.identity} artifactIdentity={artifact.identity} validationFailed={artifact.state === "validation_failed"} sourceAuthorityRevision={inspection.authorityRevision} sourceFileMutationRevision={artifact.file.mutationRevision} />
+      <EncodeOutputBrowserViewing key={artifact.identity} artifactIdentity={artifact.identity} validationFailed={artifact.state === "validation_failed"} sourceAuthorityRevision={inspection.authorityRevision} sourceFileMutationRevision={artifact.file.mutationRevision} sourceSnapshot={artifact.provenance.sourceSnapshot} />
       {artifact.state === "validation_failed" ? <EncodeOutputKeepPreflightPanel
         key={inspection.operatorInspection?.reviewToken ?? artifact.identity}
         artifactIdentity={artifact.identity}

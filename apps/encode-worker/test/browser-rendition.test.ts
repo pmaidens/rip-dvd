@@ -9,8 +9,26 @@ const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const generator: BrowserRenditionGenerator = {
   probe: compatibleOutputProbe, version: async () => "ffmpeg synthetic-test-tool",
+  measureTimeline: async () => ({ policyVersion: "browser-rendition-exact-video-v1", status: "unknown", reasonCode: "RENDITION_TIMELINE_UNVERIFIED" }),
   async generate({ destination, signal, onProgress }) { signal.throwIfAborted(); onProgress(50); await writeFile(destination, "synthetic remuxed MP4 bytes"); },
 };
+it("persists a measured viewing clock independently of source correspondence and validation", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture, true);
+  const access = fixture.openAccess();
+  const timeline = { policyVersion: "browser-rendition-exact-video-v1" as const, status: "verified" as const,
+    canonicalBytesSha256: "a".repeat(64), renditionBytesSha256: "b".repeat(64), frames: [
+      { canonical: { startMilliseconds: 23, endMilliseconds: 63 }, rendition: { startMilliseconds: 0, endMilliseconds: 40 } },
+    ] };
+  try {
+    const before = await fixture.run(["encode-output", "inspect", seeded.identity], undefined, undefined, { encodeOutputMediaProbe: compatibleOutputProbe });
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true,
+      generator: { ...generator, measureTimeline: async () => timeline } });
+    const result = await fixture.run(["encode-output", "inspect-rendition", seeded.request.id]);
+    expect(result).toMatchObject({ exitCode: 0, result: { timeline, playback: { kind: "ordinary", damageSeek: null }, source: { state: "validation_failed" } } });
+    expect(await fixture.run(["encode-output", "inspect", seeded.identity], undefined, undefined, { encodeOutputMediaProbe: compatibleOutputProbe })).toEqual(before);
+  } finally { access.close(); }
+});
 it.each([false, true])("retains a distinct rendition of the exact output without changing source status, failed=%s", async (failed) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const seeded = await requestSyntheticRendition(fixture, failed);
