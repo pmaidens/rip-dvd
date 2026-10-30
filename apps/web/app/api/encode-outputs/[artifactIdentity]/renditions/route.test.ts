@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { createOperatorWorkflowFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
-import { compatibleOutputProbe, requestSyntheticRendition } from "../../../../../../operator-cli/src/encode-output-rendition.test-support.js";
+import { compatibleOutputProbe, subtitleOutputProbe, requestSyntheticRendition } from "../../../../../../operator-cli/src/encode-output-rendition.test-support.js";
 import { createEncodeOutputRenditionsRoute } from "./route";
 import { createBrowserRenditionInspectionRoute } from "../../../browser-renditions/[id]/route";
 
@@ -39,4 +39,32 @@ it("authenticates creation and inspection before opening persistence, and reject
   expect(denied.status).toBe(401);
   const crossOrigin = await createEncodeOutputRenditionsRoute(new Request("http://localhost:3000/api/encode-outputs/synthetic/renditions", { method: "POST", headers: { Authorization: authorization, Host: "localhost:3000", Origin: "https://hostile.example", "Content-Type": "application/json" }, body: "{}" }), "synthetic", { getAccess: unavailableAccess, accessConfig: config, trustedOrigin: "http://localhost:3000" });
   expect(crossOrigin.status).toBe(403);
+});
+
+it("shares converted and burned-subtitle review, request, conflict and selection validation with the CLI", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture, true, { probe: subtitleOutputProbe });
+  const access = fixture.openAccess();
+  const url = `http://localhost:3000/api/encode-outputs/${seeded.identity}/renditions`;
+  const options = { getAccess: () => access, accessConfig: config, probe: subtitleOutputProbe, trustedOrigin: "http://localhost:3000" };
+  const cliOptions = { encodeOutputMediaProbe: subtitleOutputProbe, browserRenditionsEnabled: true };
+  const headers = { Authorization: authorization, Origin: "http://localhost:3000", Host: "localhost:3000", "Content-Type": "application/json" };
+  try {
+    const selection = { burnSubtitleIndex: 2 };
+    const review = await (await createEncodeOutputRenditionsRoute(new Request(`${url}?burnSubtitleIndex=2`, { headers }), seeded.identity, options)).json();
+    expect(review).toEqual((await fixture.run(["encode-output", "rendition-availability", seeded.identity, "--json", JSON.stringify(selection)], undefined, undefined, cliOptions)).result);
+    expect(review).toMatchObject({ available: true, conversion: { kind: "h264_aac_transcode", subtitles: "burned_in" } });
+    const input = { reviewToken: review.reviewToken, ...selection };
+    const args = ["encode-output", "request-rendition", seeded.identity, "--key", "synthetic-http-burn", "--json", JSON.stringify(input)];
+    const requested = await fixture.run(args, undefined, undefined, cliOptions);
+    const http = await createEncodeOutputRenditionsRoute(new Request(url, { method: "POST", headers, body: JSON.stringify({ mutationKey: "synthetic-http-burn", ...input }) }), seeded.identity, options);
+    expect(await http.json()).toEqual(requested.result);
+    const changed = { ...input, burnSubtitleIndex: 3 };
+    const conflict = await createEncodeOutputRenditionsRoute(new Request(url, { method: "POST", headers, body: JSON.stringify({ mutationKey: "synthetic-http-burn", ...changed }) }), seeded.identity, options);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual((await fixture.run([...args.slice(0, -1), JSON.stringify(changed)], undefined, undefined, cliOptions)).result);
+    for (const query of ["burnSubtitleIndex=-1", "burnSubtitleIndex=2&burnSubtitleIndex=3", "burnSubtitleIndex=", "other=2"]) {
+      expect((await createEncodeOutputRenditionsRoute(new Request(`${url}?${query}`, { headers }), seeded.identity, options)).status).toBe(400);
+    }
+  } finally { access.close(); }
 });

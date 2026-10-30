@@ -33,8 +33,7 @@ it("requests a distinct durable rendition through the public CLI and replays the
 });
 
 it.each([
-  ["probe", "OUTPUT_PROBE_FAILED"], ["video", "RENDITION_VIDEO_CODEC_UNSUPPORTED"],
-  ["format", "RENDITION_VIDEO_FORMAT_UNSUPPORTED"], ["audio", "RENDITION_AUDIO_CODEC_UNSUPPORTED"], ["disabled", "BROWSER_RENDITIONS_DISABLED"],
+  ["probe", "OUTPUT_PROBE_FAILED"], ["video", "RENDITION_VIDEO_STREAM_UNSUPPORTED"], ["disabled", "BROWSER_RENDITIONS_DISABLED"],
 ])("keeps %s specifically unavailable without admitting work", async (variant, reason) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const { predecessor } = seedCatalogReviewForReadFixture(fixture, { validatedOutputContents: "synthetic unavailable output" });
@@ -42,15 +41,13 @@ it.each([
   const mediaProbe = async () => {
     if (variant === "probe") throw new Error("Synthetic probe failure");
     const result = await probe();
-    if (variant === "video") result.streams[0]!.codecName = "hevc";
-    if (variant === "format") result.streams[0]!.pixelFormat = "yuv420p10le";
-    if (variant === "audio") result.streams[1]!.codecName = "ac3";
+    if (variant === "video") result.streams = result.streams.filter((stream) => stream.kind !== "video");
     return result;
   };
   const options = { encodeOutputMediaProbe: mediaProbe, browserRenditionsEnabled: variant !== "disabled" };
   const available = await fixture.run(["encode-output", "rendition-availability", identity], undefined, undefined, options);
   expect(available.exitCode).toBe(0);
-  if (variant === "probe") expect(available.result).toMatchObject({ source: { media: { streams: null } }, conversion: { copiedStreamIndexes: null, omittedStreamIndexes: null, subtitles: "unknown" } });
+  if (variant === "probe") expect(available.result).toMatchObject({ source: { media: { streams: null } }, conversion: { kind: "undetermined", copiedStreamIndexes: null, omittedStreamIndexes: null, subtitles: "unknown" } });
   expect(available.result).toMatchObject({ available: false, reasons: expect.arrayContaining([{ code: reason, message: expect.any(String) }]) });
   const reviewToken = (available.result as { reviewToken: string }).reviewToken;
   const rejected = await fixture.run(["encode-output", "request-rendition", identity, "--key", "synthetic-unavailable-request", "--json", JSON.stringify({ reviewToken })], undefined, undefined, options);

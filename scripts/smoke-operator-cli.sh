@@ -580,28 +580,41 @@ JAVASCRIPT
 printf 'Installed CLI Keep, replay, stale rejection and canonical caller export passed.\n'
 
 # Exercise successful rendition admission through the installed executable,
-# using actual compatible synthetic canonical media in the service namespace.
-rendition_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node operator-cli --input-type=module <<'JAVASCRIPT'
+# using actual compatible and incompatible synthetic media in the service namespace.
+for rendition_variant in compatible subtitles; do
+rendition_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node -e RIP_DVD_SMOKE_RENDITION_VARIANT="$rendition_variant" operator-cli --input-type=module <<'JAVASCRIPT'
 import { execFileSync } from 'node:child_process';
-import { lstatSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, writeFileSync } from 'node:fs';
 import { createLegacySidecarDataAccess } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
 import { encodeOutputFilesystemIdentity } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/index.js';
 import { loadConfig } from './apps/operator-cli/node_modules/@rip-dvd/config/dist/index.js';
+const variant = process.env.RIP_DVD_SMOKE_RENDITION_VARIANT;
+if (!['compatible', 'subtitles'].includes(variant)) throw new Error('Unknown synthetic rendition variant');
 const config = loadConfig();
 const access = createLegacySidecarDataAccess({ databasePath: config.databasePath });
 try {
-  const drive = access.catalog.upsertOpticalDrive({ devicePath: '/dev/synthetic-rendition', isPresent: true });
-  const fingerprint = 'sha256:' + 'e'.repeat(64);
+  const drive = access.catalog.upsertOpticalDrive({ devicePath: `/dev/synthetic-rendition-${variant}`, isPresent: true });
+  const fingerprint = 'sha256:' + createHash('sha256').update(`synthetic-installed-rendition-${variant}`).digest('hex');
   const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: 'dvd', fingerprint, volumeLabel: 'SYNTHETIC_RENDITION', scanData: { schemaVersion: 2, contentId: fingerprint, titles: [{ number: 1, durationSeconds: 1, chapters: 1, audioStreams: [], subtitles: [] }] } });
   access.catalog.updateDetectedDiscStatus(disc.id, 'scanned'); access.catalog.updateDetectedDiscStatus(disc.id, 'approved');
-  const archive = access.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: 'dvd', archiveFormat: 'iso', archivePath: '/data/synthetic-rendition.iso', fingerprint });
+  const archive = access.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: 'dvd', archiveFormat: 'iso', archivePath: `/data/synthetic-rendition-${variant}.iso`, fingerprint });
   const item = access.catalog.createMediaItem({ kind: 'movie', title: 'Synthetic rendition smoke film' });
   const selection = access.catalog.createDiscSelection({ originalDiscArchiveId: archive.id, mediaItemId: item.id, sourceIdentity: { kind: 'main_feature' } });
   access.catalog.completeCatalogReview(archive.id, access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0].updatedAt, 'reviewed_with_selections');
-  const profile = access.encodingProfiles.create({ key: 'synthetic-rendition-smoke', displayName: 'Synthetic rendition smoke', mediaDomain: 'dvd_video', settings: { preset: 'Fast 480p30' } });
-  const path = '/data/synthetic-rendition-source.mkv';
+  const profile = access.encodingProfiles.create({ key: `synthetic-rendition-smoke-${variant}`, displayName: 'Synthetic rendition smoke', mediaDomain: 'dvd_video', settings: { preset: 'Fast 480p30' } });
+  const path = `/data/synthetic-rendition-source-${variant}.mkv`;
   const queued = access.encodeJobs.enqueue({ discSelectionId: selection.id, encodingProfileId: profile.id, outputPath: path });
-  execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1', '-c:v', 'libx264', '-profile:v', 'high', '-level:v', '4.1', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-profile:a', 'aac_low', path], { stdio: 'pipe' });
+  const args = ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000'];
+  if (variant === 'subtitles') {
+    writeFileSync('/data/synthetic-installed-captions.srt', '1\n00:00:00,100 --> 00:00:00,900\nSYNTHETIC CAPTIONS\n');
+    args.push('-i', '/data/synthetic-installed-captions.srt');
+  }
+  args.push('-map', '0:v:0', '-map', '1:a:0');
+  if (variant === 'subtitles') args.push('-map', '2:s:0', '-c:s', 'srt', '-metadata:s:s:0', 'language=eng');
+  args.push('-t', '1', '-c:v', variant === 'compatible' ? 'libx264' : 'mpeg2video', '-pix_fmt', 'yuv420p', '-c:a', variant === 'compatible' ? 'aac' : 'ac3');
+  if (variant === 'compatible') args.push('-profile:v', 'high', '-level:v', '4.1', '-profile:a', 'aac_low');
+  execFileSync('ffmpeg', [...args, path], { stdio: 'pipe' });
   const claim = access.encodeJobs.claimNext('synthetic-rendition-smoke-worker');
   if (!claim || claim.id !== queued.id) throw new Error('Expected synthetic rendition claim');
   const cleanup = access.encodeJobs.registerPartialCleanup(claim, { publicationPending: true });
@@ -615,13 +628,29 @@ JAVASCRIPT
 rendition_identity="$(printf '%s' "$rendition_fixture" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).identity)')"
 export RIP_DVD_BROWSER_RENDITIONS_ENABLED=true
 rendition_availability="$(invoke encode-output rendition-availability "$rendition_identity")"
-printf '%s\n' "$rendition_availability" | assert_json_fields 'available=true' 'conversion.kind=stream_copy_remux'
+if [ "$rendition_variant" = compatible ]; then
+  printf '%s\n' "$rendition_availability" | assert_json_fields 'available=true' 'conversion.kind=stream_copy_remux'
+else
+  printf '%s\n' "$rendition_availability" | assert_json_fields 'available=true' 'conversion.kind=h264_aac_transcode' 'conversion.subtitles=omitted'
+fi
 rendition_review="$(printf '%s' "$rendition_availability" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.stringify({reviewToken:JSON.parse(t).reviewToken}))')"
-rendition_request="$(invoke encode-output request-rendition "$rendition_identity" --key synthetic-installed-rendition --json "$rendition_review")"
+rendition_request="$(invoke encode-output request-rendition "$rendition_identity" --key "synthetic-installed-rendition-$rendition_variant" --json "$rendition_review")"
 printf '%s\n' "$rendition_request" | assert_json_fields 'status=queued' "source.identity=$rendition_identity" 'media=null'
-rendition_replay="$(invoke encode-output request-rendition "$rendition_identity" --key synthetic-installed-rendition --json "$rendition_review")"
+rendition_replay="$(invoke encode-output request-rendition "$rendition_identity" --key "synthetic-installed-rendition-$rendition_variant" --json "$rendition_review")"
 [ "$rendition_replay" = "$rendition_request" ]
 rendition_id="$(printf '%s' "$rendition_request" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).id)')"
 rendition_state="$(invoke encode-output inspect-rendition "$rendition_id")"
 [ "$rendition_state" = "$rendition_request" ]
-printf 'Installed CLI rendition admission, inspection and replay passed.\n'
+if [ "$rendition_variant" = subtitles ]; then
+  burned_availability="$(invoke encode-output rendition-availability "$rendition_identity" --json '{"burnSubtitleIndex":2}')"
+  printf '%s\n' "$burned_availability" | assert_json_fields 'available=true' 'conversion.subtitles=burned_in' 'conversion.burnedSubtitle.sourceIndex=2'
+  burned_review="$(printf '%s' "$burned_availability" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.stringify({reviewToken:JSON.parse(t).reviewToken,burnSubtitleIndex:2}))')"
+  burned_request="$(invoke encode-output request-rendition "$rendition_identity" --key synthetic-installed-burned --json "$burned_review")"
+  printf '%s\n' "$burned_request" | assert_json_fields 'status=queued' 'conversion.subtitles=burned_in' "source.identity=$rendition_identity"
+  [ "$(invoke encode-output request-rendition "$rendition_identity" --key synthetic-installed-burned --json "$burned_review")" = "$burned_request" ]
+  burned_id="$(printf '%s' "$burned_request" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).id)')"
+  [ "$burned_id" != "$rendition_id" ]
+  [ "$(invoke encode-output inspect-rendition "$burned_id")" = "$burned_request" ]
+fi
+done
+printf 'Installed CLI remux, conversion, subtitle choice, inspection and replay passed.\n'

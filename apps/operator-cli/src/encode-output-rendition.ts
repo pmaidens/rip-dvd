@@ -9,7 +9,7 @@ export async function runEncodeOutputRendition(args: readonly string[], io: Stru
   const options = new Map<string, string>();
   for (let index = 0; index < tail.length; index++) {
     const key = tail[index]!;
-    if (action !== "request-rendition" || !["--key", "--json", "--file", "--stdin"].includes(key) || options.has(key)) throw new CommandFailure("INVALID_ARGUMENTS", "Invalid rendition option.", 2);
+    if (action === "inspect-rendition" || !["--json", "--file", "--stdin", ...(action === "request-rendition" ? ["--key"] : [])].includes(key) || options.has(key)) throw new CommandFailure("INVALID_ARGUMENTS", "Invalid rendition option.", 2);
     const value = key === "--stdin" ? "true" : tail[++index];
     if (!value || value.startsWith("--")) throw new CommandFailure("INVALID_ARGUMENTS", "Rendition option requires a value.", 2);
     options.set(key, value);
@@ -20,7 +20,7 @@ export async function runEncodeOutputRendition(args: readonly string[], io: Stru
     if (action === "request-rendition" && (typeof input !== "object" || input === null || Array.isArray(input) || "mutationKey" in input || !options.has("--key"))) throw new InvalidBrowserRenditionInputError();
     access = io.openAccess();
     const operations = createApplicationOperations(access, { encodeOutputMediaProbe: io.encodeOutputMediaProbe, browserRenditionsEnabled: io.browserRenditionsEnabled });
-    if (action === "rendition-availability") return await operations.inspectEncodeOutputRenditionAvailability(identity);
+    if (action === "rendition-availability") return await operations.inspectEncodeOutputRenditionAvailability(identity, input ?? {});
     if (action === "request-rendition") return await operations.requestEncodeOutputRendition(identity, { ...(input as Record<string, unknown>), mutationKey: options.get("--key") });
     return operations.inspectBrowserRendition(identity);
   } catch (error) {

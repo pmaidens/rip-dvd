@@ -9,7 +9,7 @@ const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const generator: BrowserRenditionGenerator = {
   probe: compatibleOutputProbe, version: async () => "ffmpeg synthetic-test-tool",
-  async remux({ destination, signal, onProgress }) { signal.throwIfAborted(); onProgress(50); await writeFile(destination, "synthetic remuxed MP4 bytes"); },
+  async generate({ destination, signal, onProgress }) { signal.throwIfAborted(); onProgress(50); await writeFile(destination, "synthetic remuxed MP4 bytes"); },
 };
 it.each([false, true])("retains a distinct rendition of the exact output without changing source status, failed=%s", async (failed) => {
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
@@ -40,7 +40,7 @@ it("reports durable progress and failure without publishing incomplete media or 
   const seeded = await requestSyntheticRendition(fixture);
   const access = fixture.openAccess();
   try {
-    const broken: BrowserRenditionGenerator = { ...generator, async remux({ destination, onProgress }) {
+    const broken: BrowserRenditionGenerator = { ...generator, async generate({ destination, onProgress }) {
       await writeFile(destination, "synthetic partial bytes"); onProgress(25);
       expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "generating", progress: { percent: 25 }, media: null });
       throw new Error("synthetic process failure");
@@ -115,5 +115,70 @@ it("does not remux a newer canonical generation that races the reviewed snapshot
     await pollBrowserRenditions({ access: racedAccess, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true, generator });
     expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", media: null, reason: { code: "RENDITION_SOURCE_CHANGED" } });
     expect(readFileSync(join(fixture.mediaLibraryPath, "previous-film.mkv"), "utf8")).toBe("synthetic replacement canonical generation");
+  } finally { access.close(); }
+});
+
+it.each([false, true])("converts incompatible streams with recorded audio, subtitle choice and canonical independence, burned=%s", async (burned) => {
+  const { subtitleOutputProbe } = await import("../../operator-cli/src/encode-output-rendition.test-support.js");
+  const { readFile } = await import("node:fs/promises");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture, true, { probe: subtitleOutputProbe, ...(burned ? { burnSubtitleIndex: 2 } : {}) });
+  const access = fixture.openAccess();
+  try {
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true, generator: {
+      ...generator, probe: (path) => path.endsWith(".mp4") ? compatibleOutputProbe(path) : subtitleOutputProbe(path),
+    } });
+    const inspected = await fixture.run(["encode-output", "inspect-rendition", seeded.request.id]);
+    expect(inspected).toMatchObject({ exitCode: 0, result: { status: "complete", conversion: { kind: "h264_aac_transcode", subtitles: burned ? "burned_in" : "omitted" },
+      source: { state: "validation_failed", encodeJob: { status: "failed" } }, media: { mediaType: "video/mp4" } } });
+    const canonical = await createApplicationOperations(access, { encodeOutputMediaProbe: subtitleOutputProbe }).inspectEncodeOutput(seeded.identity);
+    expect(canonical.artifact.media.streams).toEqual(seeded.review.source.media.streams);
+    expect((await fixture.run(seeded.args)).result).toEqual(seeded.request);
+    const record = access.browserRenditions.find(seeded.request.id)!;
+    expect(record.command).toContain("libx264"); expect(record.command).toContain("aac");
+    expect(JSON.stringify(record.command)).not.toContain(fixture.mediaLibraryPath);
+    const opened = await openBrowserRendition(access, seeded.request.id, true);
+    try { expect((await readFile(record.media!.path)).length).toBeGreaterThan(0); } finally { await opened.file.close(); }
+  } finally { access.close(); }
+});
+
+it.each(["process", "wrong_codec", "incomplete_duration", "changed_subtitle"]) ("keeps incompatible conversion %s failure durable with no playable media", async (failure) => {
+  const { subtitleOutputProbe } = await import("../../operator-cli/src/encode-output-rendition.test-support.js");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture, false, { probe: subtitleOutputProbe, burnSubtitleIndex: 2 });
+  const access = fixture.openAccess();
+  try {
+    const probe = async (path: string) => {
+      if (!path.endsWith(".mp4")) {
+        const snapshot = await subtitleOutputProbe(path);
+        if (failure === "changed_subtitle") snapshot.streams[2]!.language = "fra";
+        return snapshot;
+      }
+      const result = await compatibleOutputProbe(path);
+      if (failure === "wrong_codec") result.streams[1]!.codecName = "ac3";
+      if (failure === "incomplete_duration") result.durationSeconds = 1;
+      return result;
+    };
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true,
+      generator: { ...generator, probe, async generate(input) { await generator.generate(input); if (failure === "process") throw new Error("Synthetic conversion failure"); } } });
+    const code = failure === "changed_subtitle" ? "RENDITION_SOURCE_CHANGED" : failure === "incomplete_duration" ? "RENDITION_INCOMPLETE_COVERAGE" : "RENDITION_CONVERSION_FAILED";
+    expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", media: null, reason: { code } });
+    await expect(openBrowserRendition(access, seeded.request.id, true)).rejects.toMatchObject({ code: "RENDITION_MEDIA_UNAVAILABLE" });
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true, generator });
+    expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", media: null, reason: { code } });
+  } finally { access.close(); }
+});
+
+it("finishes a retained compatible request from the earlier conversion policy without retargeting its source", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticRendition(fixture);
+  const access = fixture.openAccess();
+  try {
+    const record = access.browserRenditions.find(seeded.request.id)!;
+    record.reviewToken = "a".repeat(64);
+    record.conversion = { kind: "stream_copy_remux", container: "mp4", copiedStreamIndexes: [0, 1], omittedStreamIndexes: [], subtitles: "none" };
+    access.browserRenditions.update(record);
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "complete", reviewToken: "a".repeat(64), source: seeded.request.source, conversion: record.conversion });
   } finally { access.close(); }
 });

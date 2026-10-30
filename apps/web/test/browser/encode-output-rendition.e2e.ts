@@ -1,18 +1,23 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import type { SyntheticViewingVariant } from "../../../encode-worker/test/browser-rendition-media.test-support.js";
 import { expect, test, type Page } from "@playwright/test";
 
 // Run only with the dedicated config and its isolated synthetic server.
 test.skip(process.env.RIP_DVD_RENDITION_BROWSER_GATE !== "true", "Requires the separate rendition browser gate.");
 const root = resolve("test-results/rendition-browser-data");
-let seeded: { id: string; identity: string };
+let seeded: { id: string; identity: string; variant: string; conversionKind: string; subtitles: string; burnSubtitleIndex?: number };
+const variant = process.env.RIP_DVD_RENDITION_BROWSER_VARIANT ?? "compatible";
+if (!["compatible", "incompatible", "audio_conversion", "video_format", "subtitles"].includes(variant)) throw new Error("Unknown synthetic viewing variant.");
+const burn = process.env.RIP_DVD_RENDITION_BROWSER_BURN_SUBTITLE;
+if (burn !== undefined && (variant !== "subtitles" || !["2", "3"].includes(burn))) throw new Error("Synthetic subtitle cases use stream 2 or 3.");
 test.beforeAll(async () => {
   const suppliedManifest = process.env.RIP_DVD_RENDITION_BROWSER_FIXTURE;
   const manifest = suppliedManifest ?? join(root, "seeded.json");
   if (existsSync(manifest)) {
     seeded = JSON.parse(readFileSync(manifest, "utf8"));
     if (!/^[0-9a-f-]{36}$/.test(seeded.id) || !/^encode-output-v1\.failed\.[0-9a-f-]{36}$/.test(seeded.identity)) throw new Error("Invalid synthetic rendition fixture identity.");
+    if (seeded.variant !== variant || seeded.burnSubtitleIndex !== (burn === undefined ? undefined : Number(burn))) throw new Error("The prepared synthetic rendition fixture does not match this browser case. Prepare a fresh matching fixture.");
     return;
   }
   if (suppliedManifest) throw new Error("The supplied synthetic rendition fixture is missing.");
@@ -21,20 +26,20 @@ test.beforeAll(async () => {
   const { requestSyntheticRendition } = await import("../../../operator-cli/src/encode-output-rendition.test-support.js");
   const { pollBrowserRenditions } = await import("../../../encode-worker/src/browser-rendition-worker.js");
   const fixture = createOperatorWorkflowFixture(root);
-  const source = join(fixture.operatorHostPath, "synthetic-browser-source.mkv");
-  execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "3", "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-profile:a", "aac_low", source]);
-  const output = await requestSyntheticRendition(fixture, true, { probe: probeEncodeOutputMedia, canonicalBytes: readFileSync(source) });
+  const { createSyntheticViewingSource } = await import("../../../encode-worker/test/browser-rendition-media.test-support.js");
+  const source = createSyntheticViewingSource(fixture.operatorHostPath, variant as SyntheticViewingVariant);
+  const output = await requestSyntheticRendition(fixture, true, { probe: probeEncodeOutputMedia, canonicalBytes: readFileSync(source), ...(burn === undefined ? {} : { burnSubtitleIndex: Number(burn) }) });
   const access = fixture.openAccess();
   try { await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true }); }
   finally { access.close(); }
-  seeded = { id: output.request.id, identity: output.identity };
+  seeded = { id: output.request.id, identity: output.identity, variant, conversionKind: output.request.conversion.kind, subtitles: output.request.conversion.subtitles, ...(burn === undefined ? {} : { burnSubtitleIndex: Number(burn) }) };
   writeFileSync(manifest, JSON.stringify(seeded));
 });
 test("prepares a retained synthetic rendition through the public operation", async ({ request }) => {
   const response = await request.get(`/api/browser-renditions/${seeded.id}`);
   expect(response.status()).toBe(200);
   expect(await response.json()).toMatchObject({ status: "complete", source: { identity: seeded.identity, state: "validation_failed" },
-    conversion: { kind: "stream_copy_remux" }, media: { mediaType: "video/mp4", availability: { available: true } } });
+    conversion: { kind: seeded.conversionKind, subtitles: seeded.subtitles }, media: { mediaType: "video/mp4", availability: { available: true } } });
 });
 
 async function openFailedRendition(page: Page) {
@@ -113,4 +118,48 @@ test("decodes non-silent rendition audio in the browser", async ({ page }) => {
     await context.close(); return peak;
   });
   expect(audioLevel).toBeGreaterThan(0.001);
+});
+
+test("shows actual conversion and subtitle labels and renders only the selected burned captions", async ({ page }) => {
+  const { video, panel } = await openFailedRendition(page);
+  await expect(panel).toContainText(seeded.conversionKind === "stream_copy_remux" ? "Stream-copy remux to MP4" : "H.264/AAC conversion to MP4");
+  await expect(panel).toContainText("Audio: #1 aac, eng");
+  if (seeded.variant === "subtitles") {
+    if (seeded.burnSubtitleIndex !== undefined) await expect(panel).toContainText(`Burned subtitle #${seeded.burnSubtitleIndex}`);
+    else await expect(panel).toContainText("No subtitles are burned in");
+    if (seeded.burnSubtitleIndex !== 2) await expect(panel).toContainText("#2 dvd_subtitle, eng");
+    if (seeded.burnSubtitleIndex !== 3) await expect(panel).toContainText("#3 subrip, fra");
+  }
+  const peak = async (at: number) => video.evaluate((element: HTMLVideoElement, target) => new Promise<number>((resolve, reject) => {
+    element.pause();
+    element.addEventListener("seeked", () => {
+      const canvas = document.createElement("canvas"); canvas.width = element.videoWidth; canvas.height = element.videoHeight;
+      const context = canvas.getContext("2d")!; context.drawImage(element, 0, 0);
+      const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let max = 0; for (let index = 0; index < rgba.length; index += 4) max = Math.max(max, rgba[index]!);
+      resolve(max);
+    }, { once: true });
+    element.addEventListener("error", () => reject(new Error("Synthetic subtitle frame could not load.")), { once: true });
+    element.currentTime = target;
+  }), at);
+  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThanOrEqual(2);
+  expect(await peak(0.1)).toBeLessThan(30);
+  const caption = await peak(1.5);
+  if (seeded.burnSubtitleIndex === undefined) expect(caption).toBeLessThan(30);
+  else expect(caption).toBeGreaterThan(180);
+  expect(await peak(2.8)).toBeLessThan(30);
+});
+
+test("reviews a selected subtitle and queues a separate burned rendition through the web controls", async ({ page, request }) => {
+  test.skip(variant !== "subtitles" || burn !== undefined, "The omitted-subtitle case supplies this interaction.");
+  const { panel } = await openFailedRendition(page);
+  await panel.getByRole("button", { name: "Check browser playback" }).click();
+  await panel.getByLabel("Burn one subtitle into a separate rendition").selectOption("2");
+  await expect(panel).toContainText("Burned subtitle #2");
+  const response = page.waitForResponse((reply) => reply.url().includes(`/encode-outputs/${seeded.identity}/renditions`) && reply.request().method() === "POST");
+  await panel.getByRole("button", { name: "Create browser rendition" }).click();
+  const created = await (await response).json();
+  expect(created).toMatchObject({ status: "queued", conversion: { subtitles: "burned_in", burnedSubtitle: { sourceIndex: 2 } }, source: { identity: seeded.identity, state: "validation_failed" } });
+  expect(created.id).not.toBe(seeded.id);
+  expect(await (await request.get(`/api/browser-renditions/${seeded.id}`)).json()).toMatchObject({ status: "complete", conversion: { subtitles: "omitted" } });
 });

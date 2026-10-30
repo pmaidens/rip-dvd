@@ -20,7 +20,7 @@ export async function pollBrowserRenditions(options: Options) {
   const root = join(await realpath(options.mediaLibraryPath), ".browser-renditions");
   await mkdir(root, { mode: 0o700, recursive: true });
   if (await realpath(root) !== root) throw new Error("Unsafe Browser Viewing Rendition directory.");
-  // The remux process inherits this lock. A dead parent cannot cause another
+  // The media process inherits this lock. A dead parent cannot cause another
   // worker to reconcile files while its surviving ffmpeg process writes them.
   let lock;
   try { lock = acquireKernelProcessLock(join(root, ".execution.lock")); } catch { return; }
@@ -40,8 +40,10 @@ export async function pollBrowserRenditions(options: Options) {
     try {
       await mkdir(directory, { mode: 0o700 });
       if (await realpath(directory) !== directory) throw new Error("Unsafe Browser Viewing Rendition request directory.");
-      const review = await inspectEncodeOutputRenditionAvailability(options.access, record.sourceIdentity, media.probe, true);
-      if (!review.available || review.reviewToken !== record.reviewToken) throw new Error("RENDITION_SOURCE_CHANGED");
+      const review = await inspectEncodeOutputRenditionAvailability(options.access, record.sourceIdentity, media.probe, true, record.conversion.burnedSubtitle ? { burnSubtitleIndex: record.conversion.burnedSubtitle.sourceIndex } : {});
+      if (!review.available || review.current.authorityRevision !== record.sourceAuthorityRevision ||
+          canonicalPublicationJson(review.source) !== record.sourceJson ||
+          (record.conversion.streams && canonicalPublicationJson(review.conversion) !== canonicalPublicationJson(record.conversion))) throw new Error("RENDITION_SOURCE_CHANGED");
       const source = join(directory, "source.mkv"), partial = join(directory, "partial.mp4"), final = join(directory, "view.mp4");
       try {
         await exportEncodeOutput(options.access, { artifactIdentity: record.sourceIdentity, destination: source, expectedEvidence: review.current });
@@ -54,25 +56,30 @@ export async function pollBrowserRenditions(options: Options) {
       const copiedStreamIndexes = record.conversion.copiedStreamIndexes;
       if (copiedStreamIndexes === null) throw new Error("RENDITION_SOURCE_CHANGED");
       record.toolVersion = await media.version();
-      record.command = ["ffmpeg", ...browserRenditionCommand("<canonical-output-snapshot>", "<browser-rendition>", copiedStreamIndexes)];
+      record.command = ["ffmpeg", ...browserRenditionCommand("<canonical-output-snapshot>", "<browser-rendition>", record.conversion)];
       options.access.browserRenditions.update(record);
       lock.assertHeld();
-      await media.remux({ source, destination: partial, streamIndexes: copiedStreamIndexes, executionDescriptor: lock.descriptor,
+      await media.generate({ source, destination: partial, conversion: record.conversion, executionDescriptor: lock.descriptor,
         signal: options.signal, durationSeconds: snapshot.durationSeconds!, onProgress(percent) {
           record.progress.percent = percent; options.access.browserRenditions.update(record);
         } });
       options.signal.throwIfAborted(); lock.assertHeld();
       const inspected = await media.probe(partial);
+      record.mediaProbeJson = canonicalPublicationJson(inspected);
       // MP4 muxing can shift duration through AAC padding and timestamp rounding.
       // This tolerance concerns container timing only, never source watchability.
       record.durationCoverage = { sourceSeconds: snapshot.durationSeconds!, renditionSeconds: inspected.durationSeconds, toleranceSeconds: 0.25 };
       if (inspected.durationSeconds === null || Math.abs(inspected.durationSeconds - snapshot.durationSeconds!) > record.durationCoverage.toleranceSeconds) throw new Error("RENDITION_INCOMPLETE_COVERAGE");
-      const copied = snapshot.streams.filter((stream) => copiedStreamIndexes.includes(stream.index));
-      if (inspected.durationSeconds === null || inspected.durationSeconds <= 0 || inspected.streams.length !== copied.length ||
-          inspected.streams.some((stream, index) => stream.kind !== copied[index]!.kind || stream.codecName !== copied[index]!.codecName)) throw new Error("RENDITION_REMUX_FAILED");
+      const expected = record.conversion.streams ?? snapshot.streams.filter((stream) => copiedStreamIndexes.includes(stream.index)).map((stream) => ({ kind: stream.kind, codec: stream.codecName, mode: "copy" }));
+      if (inspected.durationSeconds <= 0 || inspected.streams.length !== expected.length || inspected.streams.some((stream, index) => {
+        const target = expected[index]!;
+        return stream.kind !== target.kind || stream.codecName !== target.codec ||
+          (target.kind === "video" && target.mode === "transcode" && (stream.pixelFormat !== "yuv420p" || stream.profile !== "High" || stream.level !== 41)) ||
+          (target.kind === "audio" && target.mode === "transcode" && stream.profile !== "LC");
+      })) throw new Error("RENDITION_CONVERSION_FAILED");
       const file = await open(partial, constants.O_RDWR | constants.O_NOFOLLOW);
       try {
-        if (!(await file.stat()).isFile() || (await file.stat()).size === 0) throw new Error("RENDITION_REMUX_FAILED");
+        if (!(await file.stat()).isFile() || (await file.stat()).size === 0) throw new Error("RENDITION_CONVERSION_FAILED");
         await file.sync();
       } finally { await file.close(); }
       await rename(partial, final);
@@ -89,7 +96,7 @@ export async function pollBrowserRenditions(options: Options) {
       record.status = options.signal.aborted ? "interrupted" : "failed";
       const changed = error instanceof Error && error.message === "RENDITION_SOURCE_CHANGED";
       const incomplete = error instanceof Error && error.message === "RENDITION_INCOMPLETE_COVERAGE";
-      record.reason = { code: changed ? "RENDITION_SOURCE_CHANGED" : incomplete ? "RENDITION_INCOMPLETE_COVERAGE" : options.signal.aborted ? "RENDITION_INTERRUPTED" : "RENDITION_REMUX_FAILED", message: changed ? "The canonical output changed after the rendition request. Review its current identity and make a new request." : "Rendition generation did not complete. No playback or validation conclusion was recorded." };
+      record.reason = { code: changed ? "RENDITION_SOURCE_CHANGED" : incomplete ? "RENDITION_INCOMPLETE_COVERAGE" : options.signal.aborted ? "RENDITION_INTERRUPTED" : record.conversion.kind === "stream_copy_remux" ? "RENDITION_REMUX_FAILED" : "RENDITION_CONVERSION_FAILED", message: changed ? "The canonical output changed after the rendition request. Review its current identity and make a new request." : "Rendition generation did not complete. No playback or validation conclusion was recorded." };
       record.media = null;
     }
     if (record.status !== "complete") await rm(directory, { recursive: true, force: true });

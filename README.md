@@ -1744,17 +1744,33 @@ returning to the same output in that browser tab resumes inspection by the saved
 request ID. A saved rendition from an earlier file or authority generation is
 labeled historical beside current inspection. Canonical MKV bytes and normal publication remain unchanged.
 
-The initial conversion copies one actual H.264 video stream with a known 8-bit
-`yuv420p` Baseline, Main or High profile at level 4.2 or below, plus actual AAC-LC
-audio, into a distinct MP4 with fast-start metadata. Silent video is identified as
-having no audio. The command, tool version, copied and omitted stream indexes,
-and original output evidence remain recorded. The probed source and rendition durations must agree within 250 ms
-for mux timestamp rounding and AAC padding; incomplete coverage stays failed.
-Soft subtitles, including DVD
-bitmap subtitles, are omitted; no subtitle burn-in or codec conversion is
-available. Unsupported codecs, unknown compatibility and failed probes have
-specific unavailable reasons. Generation temporarily needs a complete verified
-canonical snapshot in addition to the resulting MP4.
+The worker probes actual canonical streams before choosing conversion. It copies
+compatible 8-bit `yuv420p` H.264 Baseline, Main or High video at level 4.2 or
+below and AAC-LC audio. It converts other video to H.264 High, level 4.1,
+8-bit `yuv420p`, at most 1920x1080, 30 fps and CRF 20. Incompatible audio becomes
+AAC-LC stereo, 48 kHz, 192 kbit/s. Compatible streams can still be copied when
+another stream needs conversion. Silent video is labeled as having no audio.
+The separate MP4 uses fast-start metadata and omits container metadata and chapters.
+
+The review and saved request label actual source and rendition codecs, copied
+and converted streams, audio language/title and conversion differences. A completed
+rendition also reports its observed output stream inventory. Soft
+subtitles, including DVD bitmap subtitles, are omitted by default. Choose one
+actual subtitle in **Burn one subtitle into a separate rendition** to review
+and request a separate MP4 with those captions in its video. DVD/DVB/PGS bitmap
+and supported text subtitles can be burned. Other soft subtitle streams remain
+omitted and labeled. Burning requires video conversion even when H.264 could
+otherwise be copied. The selected stream and codec, language and title remain
+recorded. A changed selection needs a fresh review token and mutation key.
+
+The command, tool version and original output evidence remain recorded. Source
+and rendition durations must agree within 250 ms for mux timestamp rounding
+and AAC padding. Wrong codecs, incomplete coverage and failed conversion never
+publish playable media. Conversion failures report `RENDITION_CONVERSION_FAILED`;
+copy-only failures retain `RENDITION_REMUX_FAILED`. Failed probes, missing or
+unsupported subtitle choices and unsupported video-stream counts have specific
+unavailable reasons. Generation temporarily needs a complete verified canonical
+snapshot in addition to the resulting MP4.
 
 The JSON CLI calls the same application operations without the web service:
 
@@ -1763,6 +1779,12 @@ rip-dvd encode-output rendition-availability <artifact-identity>
 rip-dvd encode-output request-rendition <artifact-identity> --key <mutation-key> \
   --json '{"reviewToken":"<exact-token-from-rendition-availability>"}'
 rip-dvd encode-output inspect-rendition <request-id>
+
+# Use the actual subtitle index returned in the probed inventory.
+rip-dvd encode-output rendition-availability <artifact-identity> \
+  --json '{"burnSubtitleIndex":2}'
+rip-dvd encode-output request-rendition <artifact-identity> --key <new-mutation-key> \
+  --json '{"reviewToken":"<token-from-selected-subtitle-review>","burnSubtitleIndex":2}'
 ```
 
 `--file` and `--stdin` also accept the request JSON. An exact mutation-key replay
@@ -1801,3 +1823,7 @@ server. The opt-in proxy preserves endpoint authorization and injects real HTTP
 416 responses for the error case, including native media loaders that bypass
 browser request interception. Audio analysis uses a separate page because Web
 Audio reroutes the media element's audio.
+
+The [viewing conversion validation matrix](docs/browser-rendition-validation.md)
+records the synthetic media cases, browser commands, installed CLI coverage and
+physical mobile Safari checks required for incompatible streams and burned subtitles.

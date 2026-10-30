@@ -248,12 +248,12 @@ const commandDefinitions = [
     usage: "rip-dvd encode-output <inspect|intervals|export|keep-preflight|keep|acknowledge-inspection|rendition-availability|request-rendition|inspect-rendition> <artifact-identity> [options]",
     inputs: {
       arguments: ["action: inspect|intervals|export|keep-preflight|keep|acknowledge-inspection|rendition-availability|request-rendition|inspect-rendition", "artifact-identity"],
-      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (keep, acknowledge-inspection or request-rendition)", "--json <object> | --file <path> | --stdin (intervals, keep-preflight, keep, acknowledge-inspection or request-rendition)"],
+      options: ["--destination <path> (export only)", "--receipt-limit <1..100> (inspect)", "--receipt-offset <n> (inspect)", "--key <key> (keep, acknowledge-inspection or request-rendition)", "--json <object> | --file <path> | --stdin (intervals, keep-preflight, keep, acknowledge-inspection, rendition-availability or request-rendition)"],
       keepSchema: { validationIdentity: "exact failed validation identity", previewToken: "exact Keep preflight token", acknowledged: true },
       keepPreflightSchema: { previewToken: "optional exact token from an earlier Keep preflight to compare with current evidence" },
       intervalQuerySchema: { assessmentIdentity: "exact recorded assessment identity", titleIdentityObservationId: "recorded title observation identity", intervalIndexes: "1..100 distinct indexes in recorded estimatedAffectedPlayback.intervals" },
       artifactIdentityKinds: ["encode-output-v1.published.<encode-job-id>", "encode-output-v1.retained.<retained-output-id>", "encode-output-v1.failed.<failed-output-id>"],
-      renditionRequestSchema: { reviewToken: "exact token from rendition-availability; inspect-rendition takes a request ID" },
+      renditionRequestSchema: { reviewToken: "exact token from rendition-availability; inspect-rendition takes a request ID", burnSubtitleIndex: "optional actual canonical subtitle stream index; use the same selection in rendition-availability and request-rendition" },
       acknowledgementSchema: { acknowledged: "true", reviewToken: "exact operatorInspection.reviewToken from inspect" },
     },
     example:

@@ -486,7 +486,7 @@ export function createApplicationOperations(
       archiveId: Parameters<typeof withdrawDvdTitleDamageAcceptance>[1],
       input: Parameters<typeof withdrawDvdTitleDamageAcceptance>[2],
     ) => withdrawDvdTitleDamageAcceptance(access, archiveId, input),
-    inspectEncodeOutputRenditionAvailability: (identity: unknown) => inspectEncodeOutputRenditionAvailability(access, identity, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
+    inspectEncodeOutputRenditionAvailability: (identity: unknown, selection?: unknown) => inspectEncodeOutputRenditionAvailability(access, identity, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled, selection),
     requestEncodeOutputRendition: (identity: unknown, input: unknown) => requestEncodeOutputRendition(access, identity, input, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
     inspectBrowserRendition: (id: unknown) => inspectBrowserRendition(access, id),
     inspectEncodeOutput: (
