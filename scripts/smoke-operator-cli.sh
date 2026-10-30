@@ -74,6 +74,22 @@ printf '%s\n' "$readiness_missing" | assert_json_fields 'error.code=NOT_FOUND'
 preview_help="$(invoke help damage-preview)"
 printf '%s\n' "$preview_help" | assert_json_fields 'schemaVersion=1'
 
+set +e
+rendition_missing="$(invoke encode-output rendition-availability \
+  encode-output-v1.published.00000000-0000-4000-8000-000000000000 \
+  2>"$temporary_directory/rendition.stderr")"
+rendition_status=$?
+set -e
+[ "$rendition_status" -eq 2 ]
+printf '%s\n' "$rendition_missing" | assert_json_fields 'error.code=NOT_FOUND'
+set +e
+rendition_inspection="$(invoke encode-output inspect-rendition 00000000-0000-4000-8000-000000000000 \
+  2>"$temporary_directory/rendition-inspection.stderr")"
+rendition_inspection_status=$?
+set -e
+[ "$rendition_inspection_status" -eq 2 ]
+printf '%s\n' "$rendition_inspection" | assert_json_fields 'error.code=NOT_FOUND'
+
 receipt_help="$(invoke help encode-output)"
 printf '%s\n' "$receipt_help" | assert_json_fields 'schemaVersion=1'
 set +e
@@ -546,3 +562,50 @@ assert.equal(inspected.kept.id, kept.kept.id); assert.equal(inspected.artifact.e
 assert.equal(inspected.operatorInspection.status, 'not_acknowledged'); assert.deepEqual(inspected.operatorInspection.receipts, []);
 JAVASCRIPT
 printf 'Installed CLI Keep, replay, stale rejection and canonical caller export passed.\n'
+
+# Exercise successful rendition admission through the installed executable,
+# using actual compatible synthetic canonical media in the service namespace.
+rendition_fixture="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node operator-cli --input-type=module <<'JAVASCRIPT'
+import { execFileSync } from 'node:child_process';
+import { lstatSync } from 'node:fs';
+import { createLegacySidecarDataAccess } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
+import { encodeOutputFilesystemIdentity } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/index.js';
+import { loadConfig } from './apps/operator-cli/node_modules/@rip-dvd/config/dist/index.js';
+const config = loadConfig();
+const access = createLegacySidecarDataAccess({ databasePath: config.databasePath });
+try {
+  const drive = access.catalog.upsertOpticalDrive({ devicePath: '/dev/synthetic-rendition', isPresent: true });
+  const fingerprint = 'sha256:' + 'e'.repeat(64);
+  const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: 'dvd', fingerprint, volumeLabel: 'SYNTHETIC_RENDITION', scanData: { schemaVersion: 2, contentId: fingerprint, titles: [{ number: 1, durationSeconds: 1, chapters: 1, audioStreams: [], subtitles: [] }] } });
+  access.catalog.updateDetectedDiscStatus(disc.id, 'scanned'); access.catalog.updateDetectedDiscStatus(disc.id, 'approved');
+  const archive = access.catalog.createOriginalDiscArchive({ detectedDiscId: disc.id, discKind: 'dvd', archiveFormat: 'iso', archivePath: '/data/synthetic-rendition.iso', fingerprint });
+  const item = access.catalog.createMediaItem({ kind: 'movie', title: 'Synthetic rendition smoke film' });
+  const selection = access.catalog.createDiscSelection({ originalDiscArchiveId: archive.id, mediaItemId: item.id, sourceIdentity: { kind: 'main_feature' } });
+  access.catalog.completeCatalogReview(archive.id, access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0].updatedAt, 'reviewed_with_selections');
+  const profile = access.encodingProfiles.create({ key: 'synthetic-rendition-smoke', displayName: 'Synthetic rendition smoke', mediaDomain: 'dvd_video', settings: { preset: 'Fast 480p30' } });
+  const path = '/data/synthetic-rendition-source.mkv';
+  const queued = access.encodeJobs.enqueue({ discSelectionId: selection.id, encodingProfileId: profile.id, outputPath: path });
+  execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1', '-c:v', 'libx264', '-profile:v', 'high', '-level:v', '4.1', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-profile:a', 'aac_low', path], { stdio: 'pipe' });
+  const claim = access.encodeJobs.claimNext('synthetic-rendition-smoke-worker');
+  if (!claim || claim.id !== queued.id) throw new Error('Expected synthetic rendition claim');
+  const cleanup = access.encodeJobs.registerPartialCleanup(claim, { publicationPending: true });
+  const publication = access.encodeJobs.beginPublicationMutation(claim, cleanup);
+  const completed = access.encodeJobs.completePublishedClaim(claim, publication, () => true, { publishedOutputValidation: { result: 'passed', filesystemIdentity: encodeOutputFilesystemIdentity(lstatSync(path)), completeness: 'complete' } });
+  access.encodeJobs.completePartialCleanup(publication);
+  process.stdout.write(JSON.stringify({ identity: `encode-output-v1.published.${completed.id}` }));
+} finally { access.close(); }
+JAVASCRIPT
+)"
+rendition_identity="$(printf '%s' "$rendition_fixture" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).identity)')"
+export RIP_DVD_BROWSER_RENDITIONS_ENABLED=true
+rendition_availability="$(invoke encode-output rendition-availability "$rendition_identity")"
+printf '%s\n' "$rendition_availability" | assert_json_fields 'available=true' 'conversion.kind=stream_copy_remux'
+rendition_review="$(printf '%s' "$rendition_availability" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.stringify({reviewToken:JSON.parse(t).reviewToken}))')"
+rendition_request="$(invoke encode-output request-rendition "$rendition_identity" --key synthetic-installed-rendition --json "$rendition_review")"
+printf '%s\n' "$rendition_request" | assert_json_fields 'status=queued' "source.identity=$rendition_identity" 'media=null'
+rendition_replay="$(invoke encode-output request-rendition "$rendition_identity" --key synthetic-installed-rendition --json "$rendition_review")"
+[ "$rendition_replay" = "$rendition_request" ]
+rendition_id="$(printf '%s' "$rendition_request" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).id)')"
+rendition_state="$(invoke encode-output inspect-rendition "$rendition_id")"
+[ "$rendition_state" = "$rendition_request" ]
+printf 'Installed CLI rendition admission, inspection and replay passed.\n'

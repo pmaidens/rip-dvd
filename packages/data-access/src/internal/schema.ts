@@ -2943,3 +2943,16 @@ export const keptFailedEncodeOutputs = sqliteTable("kept_failed_encode_outputs",
   check("kept_failed_outputs_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') is ${table.id} and json_extract(${table.record}, '$.artifactIdentity') is ${table.artifactIdentity} and json_extract(${table.record}, '$.validationIdentity') is ${table.failedOutputId}`),
   index("kept_failed_outputs_artifact_index").on(table.artifactIdentity, table.createdAt),
 ]);
+
+export const browserRenditions = sqliteTable("browser_renditions", {
+  id: text("id").notNull().primaryKey(),
+  sourceIdentity: text("source_identity").notNull(),
+  status: text("status").notNull(),
+  record: text("record").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => [
+  check("browser_renditions_id_not_null", sql`${table.id} is not null`),
+  check("browser_renditions_status_check", sql`${table.status} in ('queued', 'generating', 'complete', 'failed', 'interrupted')`),
+  check("browser_renditions_record_check", sql`json_valid(${table.record}) and json_extract(${table.record}, '$.id') is ${table.id} and json_extract(${table.record}, '$.status') is ${table.status} and json_extract(${table.record}, '$.sourceIdentity') is ${table.sourceIdentity}`),
+  index("browser_renditions_queue_idx").on(table.status, table.createdAt, table.id),
+]);

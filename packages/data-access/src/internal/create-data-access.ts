@@ -1,3 +1,4 @@
+import { createBrowserRenditionAccess } from "./browser-rendition-store.js";
 import { matchesEncodeOutputFilesystemIdentity } from "../encode-output-filesystem-identity.js";
 import type { EncodeJobClaimOptions } from "../encode-claim-snapshot.js";
 import { ArchiveRecoveryPreviewPauseError } from "../archive-recovery-work.js";
@@ -11809,6 +11810,7 @@ export function createDataAccessInternal(
   }
 
   const access: LegacySidecarDataAccess = {
+    browserRenditions: createBrowserRenditionAccess(sqlite, now),
     damagePreviews: createDamagePreviewAccess(sqlite, now),
     encodeOutputInspectionReceipts: createEncodeOutputInspectionReceiptAccess(sqlite, now),
     encodeOutputKeeps: createEncodeOutputKeepAccess(sqlite, now),
@@ -15240,6 +15242,7 @@ export function createDataAccessInternal(
     },
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
+        browserRenditions: { active: () => access.browserRenditions.active() },
         damagePreviews: { find: (id) => access.damagePreviews.find(id), list: (id) => access.damagePreviews.list(id) },
         dvdTitleDamageAssessments: {
           inspect: inspectDvdTitleDamageAssessment,

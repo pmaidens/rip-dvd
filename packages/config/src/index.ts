@@ -134,3 +134,11 @@ export function loadConfig(environment: Environment = process.env): RuntimeConfi
     ),
   };
 }
+
+/** This optional capability stays closed until its media and release gates pass. */
+export function browserRenditionConfig(environment: Environment = process.env) {
+  return {
+    enabled: environment.RIP_DVD_BROWSER_RENDITIONS_ENABLED === "true",
+    password: environment.RIP_DVD_BROWSER_RENDITIONS_PASSWORD || null,
+  };
+}

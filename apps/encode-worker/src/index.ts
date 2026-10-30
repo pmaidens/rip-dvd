@@ -1,3 +1,4 @@
+import { runBrowserRenditionWorker } from "./browser-rendition-worker.js";
 import { runDamagePreviewWorker } from "./damage-preview-worker.js";
 import { randomUUID } from "node:crypto";
 
@@ -25,8 +26,9 @@ await runConfiguredAsyncWorker(
         ),
     });
     const previewAccess = createDataAccess({ databasePath: config.databasePath, originalsLibraryPath: config.originalsLibraryPath });
+    const renditionAccess = createDataAccess({ databasePath: config.databasePath, originalsLibraryPath: config.originalsLibraryPath });
     try {
-      await Promise.all([runDamagePreviewWorker({ access: previewAccess, originalsLibraryPath: config.originalsLibraryPath, mediaLibraryPath: config.mediaLibraryPath, signal, pollIntervalMs: config.workerPollIntervalMs, log }), runEncodeWorker({
+      await Promise.all([runBrowserRenditionWorker({ access: renditionAccess, mediaLibraryPath: config.mediaLibraryPath, signal, pollIntervalMs: config.workerPollIntervalMs, log }), runDamagePreviewWorker({ access: previewAccess, originalsLibraryPath: config.originalsLibraryPath, mediaLibraryPath: config.mediaLibraryPath, signal, pollIntervalMs: config.workerPollIntervalMs, log }), runEncodeWorker({
         access,
         concurrency: config.encodeWorkerConcurrency,
         log,
@@ -37,6 +39,7 @@ await runConfiguredAsyncWorker(
         workerId: `encode-worker:${process.pid}:${randomUUID()}`,
       })]);
     } finally {
+      renditionAccess.close();
       previewAccess.close();
       access.close();
     }

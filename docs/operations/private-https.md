@@ -11,7 +11,8 @@ Operator device -> https://dvd-host.example-tailnet.ts.net:443
                 -> http://127.0.0.1:3000 -> Compose web:3000
 ```
 
-The application has no authentication. TLS encrypts traffic and establishes
+The dashboard is unauthenticated except for optional Browser Viewing Rendition
+access, which requires its configured HTTP Basic credentials. TLS encrypts traffic and establishes
 browser trust; tailnet grants control who can reach it. Every client granted
 access can operate the application. Restrict HTTPS access to intended
 operators, keep Funnel disabled for this listener, and keep the backend off

@@ -51,6 +51,9 @@ export interface EncodeOutputMediaStream {
   index: number;
   kind: EncodeOutputStreamKind;
   codecName: string | null;
+  profile?: string | null;
+  pixelFormat?: string | null;
+  level?: number | null;
   language: string | null;
   title: string | null;
   default: boolean | null;
@@ -117,6 +120,9 @@ export class EncodeOutputExportRejectedError extends Error {
 
 interface ProbeJsonStream {
   codec_name?: unknown;
+  profile?: unknown;
+  pix_fmt?: unknown;
+  level?: unknown;
   codec_type?: unknown;
   disposition?: unknown;
   index?: unknown;
@@ -179,6 +185,9 @@ function parseMediaProbe(stdout: string): EncodeOutputMediaInspection {
       index: stream.index as number,
       kind: streamKind(stream.codec_type),
       codecName: boundedMetadata(stream.codec_name),
+      profile: boundedMetadata(stream.profile),
+      pixelFormat: boundedMetadata(stream.pix_fmt),
+      level: typeof stream.level === "number" && Number.isSafeInteger(stream.level) ? stream.level : null,
       language: boundedMetadata(tags.language),
       title: boundedMetadata(tags.title),
       default: probeFlag(disposition.default),
@@ -211,7 +220,7 @@ export const probeEncodeOutputMedia: EncodeOutputMediaProbe =
           "-v",
           "error",
           "-show_entries",
-          "format=duration:stream=index,codec_type,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+          "format=duration:stream=index,codec_type,codec_name,profile,pix_fmt,level:stream_tags=language,title:stream_disposition=default,forced",
           "-of",
           "json",
           outputPath,
@@ -1374,7 +1383,7 @@ async function copyOpenFile(
 
 export async function exportEncodeOutput(
   access: DataAccess,
-  input: { artifactIdentity: unknown; destination: unknown },
+  input: { artifactIdentity: unknown; destination: unknown; expectedEvidence?: { authorityRevision: string; fileMutationRevision: string | null } },
 ) {
   if (
     typeof input.destination !== "string" ||
@@ -1389,6 +1398,9 @@ export async function exportEncodeOutput(
     input.artifactIdentity,
   );
   const initialAuthority = resolveEncodeOutputAuthority(access, parsedIdentity);
+  if (input.expectedEvidence !== undefined && evidenceDigest(initialAuthority.authorityKey) !== input.expectedEvidence.authorityRevision) {
+    throw new EncodeOutputExportRejectedError("OUTPUT_AUTHORITY_CHANGED", "The Encode Output authority differs from the reviewed generation.", initialAuthority.artifactIdentity, await currentEncodeOutputIdentity(initialAuthority.outputPath));
+  }
   if (initialAuthority.authorityUnavailableReason !== null) {
     throw new EncodeOutputExportRejectedError(
       "OUTPUT_AUTHORITY_CHANGED",
@@ -1422,6 +1434,9 @@ export async function exportEncodeOutput(
       throw await rejectedSourceOpen(initialAuthority, error);
     }
     const before = await source.stat();
+    if (input.expectedEvidence !== undefined && fileMutationRevision(before) !== input.expectedEvidence.fileMutationRevision) {
+      throw new EncodeOutputExportRejectedError("OUTPUT_IDENTITY_CHANGED", "The Encode Output file differs from the reviewed generation.", initialAuthority.artifactIdentity, encodeOutputFilesystemIdentity(before));
+    }
     const sourceRejection = exportSourceRejection(initialAuthority, before);
     if (sourceRejection !== null) throw sourceRejection;
     const sourceIdentity = encodeOutputFilesystemIdentity(before);
@@ -1560,3 +1575,20 @@ export async function exportEncodeOutput(
 export type EncodeOutputInspection = Awaited<
   ReturnType<typeof inspectEncodeOutput>
 >;
+
+/** Stage media checks before the writer lock; return a database-only authority fence. */
+export function prepareEncodeOutputEvidenceCommit(access: DataAccess, evidence: Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>) {
+  const base = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(evidence.artifact.identity));
+  if (base.authorityUnavailableReason !== null || evidenceDigest(base.authorityKey) !== evidence.authorityRevision) {
+    throw new Error("OUTPUT_AUTHORITY_CHANGED");
+  }
+  const metadata = lstatSync(base.outputPath);
+  if (fileIsRegularAndNonempty(metadata) !== null || exportSourceRejection(base, metadata) !== null ||
+      fileMutationRevision(metadata) !== evidence.artifact.file.mutationRevision) throw new Error("OUTPUT_IDENTITY_CHANGED");
+  return () => {
+    const current = resolveEncodeOutputAuthority(access, parseEncodeOutputArtifactIdentity(evidence.artifact.identity));
+    if (current.authorityUnavailableReason !== null || evidenceDigest(current.authorityKey) !== evidence.authorityRevision) {
+      throw new Error("OUTPUT_AUTHORITY_CHANGED");
+    }
+  };
+}

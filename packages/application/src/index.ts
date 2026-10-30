@@ -1,3 +1,4 @@
+import { inspectEncodeOutputRenditionAvailability, requestEncodeOutputRendition, inspectBrowserRendition } from "./encode-output-rendition.js";
 import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";
 import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js";
 import { previewEncodeOutputKeep } from "./encode-output-keep-preflight.js";
@@ -317,6 +318,7 @@ function readDeploymentReadiness(access: ConsistentReadAccess) {
       access.dvdRecoveryStorage.readCurrent(),
     ),
     activeWork: [
+      ...access.browserRenditions.active().map(({ id, status }) => ({ kind: "browser_rendition", id, status })),
       ...access.damagePreviews.list().filter((preview) => ["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.status)).map(({ id, status }) => ({ kind: "damage_preview", id, status })),
       ...inspections,
       ...archiveRequests,
@@ -335,6 +337,7 @@ export function createApplicationOperations(
   dependencies: {
     archiveImageOwnership?: ArchiveImageOwnership;
     encodeOutputMediaProbe?: EncodeOutputMediaProbe;
+    browserRenditionsEnabled?: boolean;
   } = {},
 ) {
   return {
@@ -481,6 +484,9 @@ export function createApplicationOperations(
       archiveId: Parameters<typeof withdrawDvdTitleDamageAcceptance>[1],
       input: Parameters<typeof withdrawDvdTitleDamageAcceptance>[2],
     ) => withdrawDvdTitleDamageAcceptance(access, archiveId, input),
+    inspectEncodeOutputRenditionAvailability: (identity: unknown) => inspectEncodeOutputRenditionAvailability(access, identity, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
+    requestEncodeOutputRendition: (identity: unknown, input: unknown) => requestEncodeOutputRendition(access, identity, input, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
+    inspectBrowserRendition: (id: unknown) => inspectBrowserRendition(access, id),
     inspectEncodeOutput: (
       artifactIdentity: unknown,
       page?: { receiptLimit?: number; receiptOffset?: number },
@@ -1161,3 +1167,5 @@ export { measureEncodeSourceCell, measureEncodeOutputCell } from "./encode-outpu
 export type { EncodeSourceCellMeasurement, CorrespondenceMediaTool } from "./encode-output-cell-correspondence.js";
 export { keepFailedEncodeOutput, EncodeOutputKeepRejectedError, InvalidEncodeOutputKeepInputError } from "./encode-output-keep.js";
 export type { EncodeOutputKeepResult } from "./encode-output-keep.js";
+
+export * from "./encode-output-rendition.js";

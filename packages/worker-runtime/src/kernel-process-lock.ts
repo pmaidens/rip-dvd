@@ -3,6 +3,7 @@ import { constants, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFi
 import { dirname } from "node:path";
 
 export interface KernelProcessLock {
+  readonly descriptor: number;
   assertHeld(): void;
   release(): void;
 }
@@ -49,6 +50,7 @@ export function acquireKernelProcessLock(path: string): KernelProcessLock {
     } else if (process.env.NODE_ENV === "test" && !testLocks.has(path)) testLocks.add(path);
     else throw new Error("Process locks are unavailable.");
     return {
+      descriptor,
       assertHeld() {
         if (released) throw new Error("Process lock was released.");
         const named = lstatSync(path), held = fstatSync(descriptor);

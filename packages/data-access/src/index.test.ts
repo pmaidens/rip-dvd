@@ -1347,6 +1347,7 @@ describe("data-access facade", () => {
         "archive_recoveries",
         "archive_recovery_work",
         "archive_requests",
+        "browser_renditions",
         "catalog_review_evidence_choices",
         "disc_inspection_attempts",
         "disc_inspections",
@@ -1382,7 +1383,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(56);
+    expect(identifierTables).toHaveLength(57);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -1412,6 +1413,15 @@ describe("data-access facade", () => {
                               : sql.includes(`${name}_id_not_null`),
       ),
     ).toBe(true);
+    const insertRendition = sqlite.prepare("INSERT INTO browser_renditions (id, source_identity, status, record, created_at) VALUES (?, ?, ?, ?, ?)");
+    expect(() => insertRendition.run(null, "synthetic-source", "queued", JSON.stringify({ id: null, sourceIdentity: "synthetic-source", status: "queued" }), 0))
+      .toThrow(/browser_renditions_id_not_null/);
+    for (const missing of ["id", "sourceIdentity", "status"]) {
+      const record: Record<string, string> = { id: "synthetic-rendition", sourceIdentity: "synthetic-source", status: "queued" };
+      delete record[missing];
+      expect(() => insertRendition.run("synthetic-rendition", "synthetic-source", "queued", JSON.stringify(record), 0))
+        .toThrow(/browser_renditions_record_check/);
+    }
     expect(sqlite.prepare("PRAGMA foreign_key_list(kept_failed_encode_outputs)").all()).toMatchObject([
       { table: "validation_failed_encode_outputs", from: "failed_output_id", to: "id", on_delete: "RESTRICT" },
     ]);
@@ -10036,10 +10046,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 19",
+          "select name from __drizzle_migrations order by id desc limit 20",
         )
         .all(),
       ).toEqual([
+        { name: "20261029052209_worthless_gwen_stacy" },
         { name: "20261029042748_elite_gargoyle" },
         { name: "20261028235557_slippery_paladin" },
         { name: "20261028231111_encode-output-validations" },
