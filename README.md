@@ -1784,6 +1784,10 @@ Linux process locks. Browser coverage is authored for stable desktop Chrome and
 mobile WebKit using actual synthetic MP4 media. Mobile WebKit automation is an
 approximation; the release gate also requires current mobile Safari validation.
 
+`pnpm test:browser:renditions` prepares its synthetic archive fixtures in test
+mode. Its standalone web server runs in production mode, and rendition
+generation uses the real media tools and Linux process locks.
+
 The rendition browser gate can use a separately running isolated synthetic
 server through `RIP_DVD_RENDITION_BROWSER_BASE_URL`. Run its preparation test on
 Linux, then supply the generated private `seeded.json` through

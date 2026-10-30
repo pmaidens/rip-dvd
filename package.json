@@ -16,7 +16,7 @@
     "test": "node --test scripts/optical-drive-mapping.test.mjs scripts/deploy.test.mjs scripts/operator-capability-inventory.test.mjs scripts/damage-preview-export.test.mjs && pnpm test:prepare && pnpm --parallel --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/archive-worker --filter @rip-dvd/encode-worker --filter @rip-dvd/application --filter @rip-dvd/operator-cli --filter @rip-dvd/web exec vitest run",
     "test:prepare": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/application --filter @rip-dvd/operator-cli build && node apps/encode-worker/scripts/build-atomic-exchange.mjs",
     "test:rendition-media": "RIP_DVD_TEST_RENDITION_MEDIA=true pnpm --filter @rip-dvd/encode-worker exec vitest run test/browser-rendition-media.test.ts --maxWorkers=1",
-    "test:browser:renditions": "RIP_DVD_RENDITION_BROWSER_GATE=true pnpm --filter @rip-dvd/web exec playwright test --config playwright.rendition.config.ts",
+    "test:browser:renditions": "NODE_ENV=test RIP_DVD_RENDITION_BROWSER_GATE=true pnpm --filter @rip-dvd/web exec playwright test --config playwright.rendition.config.ts",
     "test:browser": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/application build && pnpm --filter @rip-dvd/web test:browser",
     "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
     "test:operator-cli-deployment": "sh scripts/smoke-operator-cli.sh",
