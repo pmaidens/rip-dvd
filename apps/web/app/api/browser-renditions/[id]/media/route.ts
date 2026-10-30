@@ -26,7 +26,15 @@ export async function createBrowserRenditionMediaRoute(request: Request, id: str
     const { file, rendition, sizeBytes } = await openBrowserRendition(getAccess(), id, config.enabled);
     try {
       const headers = new Headers({ "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-        "ETag": `"${rendition.media!.identity}"`, "X-Encode-Output-State": rendition.source.state, "X-Encode-Output-Validation": rendition.source.validation.result });
+        "ETag": `"${rendition.media!.identity}"` });
+      if (rendition.previewCondition) {
+        headers.set("X-Damage-Preview-State", rendition.previewCondition.status);
+        headers.set("X-Damage-Preview-Generation", rendition.previewCondition.generationStatus);
+        headers.set("X-Damage-Preview-Outdated", String(rendition.previewCondition.outdated));
+      } else if ("validation" in rendition.source) {
+        headers.set("X-Encode-Output-State", rendition.source.state);
+        headers.set("X-Encode-Output-Validation", rendition.source.validation.result);
+      }
       const rangeValue = request.headers.get("Range");
       const ifRange = request.headers.get("If-Range");
       const useRange = request.method === "GET" && rangeValue !== null && (ifRange === null || ifRange === headers.get("ETag"));

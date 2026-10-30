@@ -20070,21 +20070,30 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         { operation: "claim-encode" },
       ],
     });
-    const winners = results.filter(
-      (result): result is { outcome: "cancelled" | "claimed"; id: string } =>
-        typeof result === "object" &&
-        result !== null &&
-        "outcome" in result &&
-        (result.outcome === "cancelled" || result.outcome === "claimed"),
-    );
-    expect(winners).toHaveLength(1);
-    expect(winners[0]?.id).toBe(job.id);
-    expect(access.encodeJobs.list()).toEqual([
-      expect.objectContaining({
-        id: job.id,
-        status: winners[0]?.outcome === "cancelled" ? "cancelled" : "running",
-      }),
-    ]);
+    const jobs = access.encodeJobs.list();
+    expect(jobs).toHaveLength(1);
+    const cancellation = results[0];
+    if (typeof cancellation === "object" && cancellation?.outcome === "cancelled") {
+      expect(results).toEqual([
+        { outcome: "cancelled", id: job.id },
+        { outcome: "rejected" },
+      ]);
+      expect(jobs[0]).toMatchObject({
+        id: job.id, status: "cancelled", claimedBy: null, claimToken: null,
+        reservesOutputPath: false,
+      });
+    } else {
+      // Claiming first does not discard the cancellation that commits next.
+      expect(results).toEqual([
+        { outcome: "cancellation_requested", id: job.id },
+        { outcome: "claimed", id: job.id },
+      ]);
+      expect(jobs[0]).toMatchObject({
+        id: job.id, status: "cancellation_requested",
+        claimedBy: "operation-worker-1", claimToken: expect.any(String),
+        reservesOutputPath: true,
+      });
+    }
     access.close();
   });
 

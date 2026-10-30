@@ -86,3 +86,62 @@ incompatible conversion, omitted text subtitles and a separate selected burned
 rendition. Those requests prove installed CLI admission and persistence; the real
 media and browser gates separately prove generated playback. Do not enable
 production admission or deploy as part of these checks.
+
+## Damage Preview rendition gate
+
+The preview operations and shared contracts are documented in
+`docs/damage-preview-browser-viewing.md`. Run the focused preview public CLI,
+HTTP, worker and player tests first. They include stale admission, retained
+partial/interrupted/failed samples, conversion failure, missing media, deletion
+revocation, durable replay and per-request authorization and range checks.
+
+`pnpm test:preview-rendition-media` runs the real preview FFmpeg gate separately.
+It proves stream copy and incompatible/audio conversion, omitted and individually
+burned bitmap/text subtitles, nonzero decoded audio, decoded seeks near the end,
+canonical byte-preserving export, partial/outdated provenance and a 130-second
+sample without truncation. A real failed encoder must produce no playable media.
+
+After the production build, run `sh scripts/check-preview-rendition-browsers.sh`
+in the coordinated validation slot. It runs stable installed Chrome and mobile
+WebKit automation sequentially for these rows:
+
+| Sample case | Source variant | Burn subtitle |
+| --- | --- | --- |
+| complete | compatible | none |
+| complete | incompatible | none |
+| complete | audio_conversion | none |
+| complete | video_format | none |
+| complete | subtitles | none, 2 and 3 as separate runs |
+| partial | incompatible | none |
+| stale | incompatible | none |
+| longclip | compatible, 130 seconds | none |
+| missing | compatible, derived file absent | none |
+| conversion_failure | incompatible, actual failed encoder | none |
+
+Each run keeps a separate ignored fixture directory, manifest and traces. It
+refuses to overwrite an existing fixture. A single row can be run with
+`RIP_DVD_PREVIEW_BROWSER_RUN=synthetic-review-1`,
+`RIP_DVD_PREVIEW_BROWSER_CASE`, `RIP_DVD_PREVIEW_BROWSER_VARIANT`, and optionally
+`RIP_DVD_PREVIEW_BROWSER_BURN_SUBTITLE`, followed by
+`pnpm test:browser:preview-renditions`. External server mode uses matching settings
+plus `RIP_DVD_PREVIEW_BROWSER_BASE_URL` and
+`RIP_DVD_PREVIEW_BROWSER_FIXTURE`. The manifest must match the exact row.
+
+For each row on current mobile Safari on a physical device, use the isolated
+synthetic HTTPS server and open Catalog Review, Damage decision, then inspect the
+manifest's preview request. Sign in through `/viewing-access`. Verify revision,
+coverage and canonical MKV relationship. For playable cases, listen to audio,
+seek near the end, confirm the partial/outdated labels remain beside playback,
+and check the selected subtitle appears and clears at its cue. Confirm the
+long clip seeks beyond two minutes. Inject the authenticated synthetic fault
+proxy's 416 response and confirm the playback error preserves sample conditions.
+For missing/conversion-failure rows, confirm explicit unavailability and no
+playable media. In a fresh unsigned-in session, check that creation, inspection,
+full media, HEAD and each range request are unauthorized. Record the actual iOS,
+Safari and Chrome versions and results privately. WebKit automation and earlier
+issues' physical-device deferrals do not satisfy this gate.
+
+Also run `pnpm check`, `pnpm build`, `pnpm test:browser` and
+`pnpm test:operator-cli-deployment`. The installed wrapper now reviews, requests,
+inspects and replays a canonical preview rendition before canonical export and
+deletion. These commands do not enable production admission or deploy anything.

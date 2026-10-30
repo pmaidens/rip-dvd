@@ -1,3 +1,4 @@
+import { inspectDamagePreviewRenditionAvailability, requestDamagePreviewRendition } from "./damage-preview-rendition.js";
 import { inspectEncodeOutputRenditionAvailability, requestEncodeOutputRendition, inspectBrowserRendition } from "./encode-output-rendition.js";
 import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";
 import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js";
@@ -486,6 +487,8 @@ export function createApplicationOperations(
       archiveId: Parameters<typeof withdrawDvdTitleDamageAcceptance>[1],
       input: Parameters<typeof withdrawDvdTitleDamageAcceptance>[2],
     ) => withdrawDvdTitleDamageAcceptance(access, archiveId, input),
+    inspectDamagePreviewRenditionAvailability: (identity: unknown, selection?: unknown) => inspectDamagePreviewRenditionAvailability(access, identity, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled, selection),
+    requestDamagePreviewRendition: (identity: unknown, input: unknown) => requestDamagePreviewRendition(access, identity, input, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
     inspectEncodeOutputRenditionAvailability: (identity: unknown, selection?: unknown) => inspectEncodeOutputRenditionAvailability(access, identity, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled, selection),
     requestEncodeOutputRendition: (identity: unknown, input: unknown) => requestEncodeOutputRendition(access, identity, input, dependencies.encodeOutputMediaProbe, dependencies.browserRenditionsEnabled),
     inspectBrowserRendition: (id: unknown) => inspectBrowserRendition(access, id),
@@ -1172,3 +1175,5 @@ export type { EncodeOutputKeepResult } from "./encode-output-keep.js";
 
 export * from "./encode-output-rendition.js";
 export type DamagePreviewRecreationReview = Awaited<ReturnType<typeof inspectDamagePreviewRecreation>>;
+
+export * from "./damage-preview-rendition.js";

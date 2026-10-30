@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type FormEvent } from "react";
+import { DamagePreviewBrowserViewing } from "./damage-preview-browser-viewing";
 import { createMutationKey } from "../lib/mutation-key";
 import type { DamagePreviewAvailability, DamagePreviewInspection, DamagePreviewRecreationReview } from "@rip-dvd/application";
 
@@ -261,9 +262,9 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         {preview.media.removal?.state === "pending" ? <p>Removal is queued for the Encode worker. Refresh preview status to see completion or failure.</p> : null}
         <button type="button" disabled={busy || !preview.media.deletion.available} onClick={() => void deleteMedia()}>Delete preview media</button>
         {preview.media.deletion.reasons.map((reason) => <p key={reason.code}>{reason.message}</p>)}
-        {preview.artifacts.map((artifact) => <p key={artifact.identity}>
+        {preview.artifacts.map((artifact) => <div key={artifact.identity}><p>
           {artifact.media.state === "retained" ? <a href={`/api/damage-preview-media/${encodeURIComponent(artifact.identity)}`}>Download canonical MKV, {artifact.sizeBytes} bytes</a> : <>Media unavailable: {artifact.media.reasonCode}</>}. Actual coverage: {seconds(artifact.coverage.startMilliseconds)} to {seconds(artifact.coverage.endMilliseconds)}. {preview.status}.
-        </p>)}
+        </p><DamagePreviewBrowserViewing artifactIdentity={artifact.identity} preview={preview} /></div>)}
         <details><summary>Preview provenance</summary><pre>{JSON.stringify(preview.provenance, null, 2)}</pre></details>
       </div> : null}
     </section>

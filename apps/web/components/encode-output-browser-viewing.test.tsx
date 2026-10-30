@@ -114,3 +114,27 @@ it("reviews the chosen subtitle before submitting a separate burned rendition an
     expect(container.textContent).toContain("Validation-failed source");
   } finally { await act(async () => root.unmount()); }
 });
+
+it("retains an in-flight request for its original artifact without showing it after the inspected artifact changes", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let complete: (response: Response) => void = () => { throw new Error("Request not started"); };
+  const pending = new Promise<Response>((resolve) => { complete = resolve; });
+  const source = { identity: "earlier-artifact", state: "published", file: { mutationRevision: "synthetic-file" }, media: { streams: [] } };
+  vi.stubGlobal("fetch", async (_url: string, options?: { method?: string }) => options?.method === "POST" ? pending
+    : Response.json({ available: true, reasons: [], reviewToken: "synthetic-token", source, conversion: { subtitles: "none" } }));
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  try {
+    const render = (identity: string) => root.render(<EncodeOutputBrowserViewing artifactIdentity={identity} validationFailed={false} sourceAuthorityRevision="synthetic-authority" sourceFileMutationRevision="synthetic-file" />);
+    await act(async () => render("earlier-artifact"));
+    const button = (label: string) => [...container.querySelectorAll("button")].find((element) => element.textContent === label)!;
+    await act(async () => button("Check browser playback").click());
+    await act(async () => button("Create browser rendition").click());
+    await act(async () => render("current-artifact"));
+    await act(async () => complete(Response.json({ id: "earlier-request", status: "complete", progress: { percent: 100 }, source, sourceAuthorityRevision: "synthetic-authority", conversion: { subtitles: "none" }, reason: null, media: { identity: "synthetic-media" } })));
+    expect(container.querySelector("video")).toBeNull();
+    expect(container.textContent).not.toContain("earlier-request");
+    expect(sessionStorage.getItem("encode-output-browser-rendition:earlier-artifact")).toBe("earlier-request");
+    expect(sessionStorage.getItem("encode-output-browser-rendition:current-artifact")).toBeNull();
+  } finally { await act(async () => root.unmount()); }
+});

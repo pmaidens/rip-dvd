@@ -21,7 +21,9 @@
     "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
     "test:operator-cli-deployment": "sh scripts/smoke-operator-cli.sh",
     "typecheck": "pnpm -r --if-present typecheck",
-    "lint": "pnpm --filter @rip-dvd/web lint"
+    "lint": "pnpm --filter @rip-dvd/web lint",
+    "test:preview-rendition-media": "RIP_DVD_TEST_PREVIEW_RENDITION_MEDIA=true pnpm --filter @rip-dvd/encode-worker exec vitest run test/damage-preview-rendition-media.test.ts --maxWorkers=1",
+    "test:browser:preview-renditions": "NODE_ENV=test RIP_DVD_PREVIEW_RENDITION_BROWSER_GATE=true pnpm --filter @rip-dvd/web exec playwright test --config playwright.preview-rendition.config.ts"
   },
   "devDependencies": {
     "@types/node": "22.20.0",

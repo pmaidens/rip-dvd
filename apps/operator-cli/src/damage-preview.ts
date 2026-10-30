@@ -1,10 +1,13 @@
+import { runBrowserRendition } from "./encode-output-rendition.js";
+import type { EncodeOutputMediaProbe } from "@rip-dvd/application";
 import { createApplicationOperations, DamagePreviewRejectedError, InvalidDamagePreviewInputError, InvalidMutationKeyError } from "@rip-dvd/application";
 import { MutationKeyConflictError, RecordNotFoundError, type DataAccess } from "@rip-dvd/data-access";
 import { CommandFailure } from "./command.js";
 import { readStructuredObject, type StructuredInputIO } from "./structured-input.js";
 
-export async function runDamagePreview(args: readonly string[], io: StructuredInputIO & { openAccess(): DataAccess }): Promise<unknown> {
+export async function runDamagePreview(args: readonly string[], io: StructuredInputIO & { openAccess(): DataAccess; encodeOutputMediaProbe?: EncodeOutputMediaProbe; browserRenditionsEnabled?: boolean }): Promise<unknown> {
   const [action, id, ...tail] = args;
+  if (["rendition-availability", "request-rendition", "inspect-rendition"].includes(action ?? "")) return runBrowserRendition(args, io, "damage_preview");
   const allowed: Record<string, string[]> = {
     availability: ["--json", "--stdin", "--file"], request: ["--json", "--stdin", "--file", "--key"],
     recreate: ["--json", "--stdin", "--file", "--key"],

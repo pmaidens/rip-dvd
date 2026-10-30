@@ -15,6 +15,7 @@ export type BrowserRenditionTimeline = {
 export interface BrowserRenditionRecord {
   id: string;
   sourceIdentity: string;
+  sourceKind?: "damage_preview";
   sourceJson: string;
   sourceAuthorityRevision: string;
   reviewToken: string;
@@ -45,6 +46,7 @@ export interface BrowserRenditionRecord {
 export interface BrowserRenditionRequest {
   mutationKey: string;
   sourceIdentity: string;
+  sourceKind?: "damage_preview";
   reviewToken: string;
   burnSubtitleIndex?: number;
 }
@@ -53,6 +55,7 @@ export interface BrowserRenditionAccess {
   replay(input: BrowserRenditionRequest): BrowserRenditionRecord | null;
   submit(input: BrowserRenditionRequest, prepare: () => Pick<BrowserRenditionRecord, "sourceJson" | "sourceAuthorityRevision" | "conversion"> & { assertAuthority(): void }): BrowserRenditionRecord;
   active(): BrowserRenditionRecord[];
+  retainedPreviewMedia(): BrowserRenditionRecord[];
   claim(): BrowserRenditionRecord | null;
   update(record: BrowserRenditionRecord): void;
 }
