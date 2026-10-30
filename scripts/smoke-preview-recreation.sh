@@ -34,6 +34,19 @@ cd "$repository_root"
 for image in "$RIP_DVD_RECREATION_VALIDATION_IMAGE" "$RIP_DVD_RECREATION_CLI_IMAGE" "$RIP_DVD_RECREATION_WORKER_IMAGE"; do docker image inspect "$image" >/dev/null; done
 ./install.sh --bin-dir "$temporary_directory/bin" >/dev/null
 installed_cli="$temporary_directory/bin/rip-dvd"
+# Fresh named-volume roots belong only to this project. Initialize them before
+# the read-only CLI mount or UID 1000 fixture writer is admitted.
+docker compose --profile validation run --rm --no-deps --no-TTY --user 0:0 --workdir /app --entrypoint node validation --input-type=module <<'JAVASCRIPT'
+import { chownSync, mkdirSync, realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { loadConfig } from './packages/config/dist/index.js';
+const config = loadConfig();
+for (const directory of [dirname(config.databasePath), config.mediaLibraryPath, config.originalsLibraryPath]) {
+  mkdirSync(directory, { recursive: true });
+  if (realpathSync(directory) !== directory) throw new Error('Unsafe synthetic volume root');
+  chownSync(directory, 1000, 1000);
+}
+JAVASCRIPT
 "$installed_cli" health >/dev/null
 # The sentinel is created only inside this smoke's owned synthetic volumes.
 docker compose run --rm --no-deps --no-TTY --entrypoint node encode-worker --input-type=module <<'JAVASCRIPT'
