@@ -72,7 +72,8 @@ These contracts are also relevant to work on Encode Output playback:
 - Rendition range access refreshes the parent preview's media-use time. Pending
   canonical deletion immediately revokes new derived-media access. After canonical
   deletion or proven absence, the rendition worker removes its owned MP4 directory
-  under its execution lock and preserves request/conversion history. A source
+  under its execution lock, synchronizes the parent directory before committing
+  absence, and preserves request/conversion history. A source
   becoming outdated alone does not remove or relabel its immutable provenance.
 
 Canonical exports and the existing Damage Preview generation, recreation and
