@@ -154,10 +154,16 @@ const commandDefinitions = [
   },
   {
     name: "damage-preview",
-    description: "Review and request checkpoint-bound Damage Previews; inspect, wait, cancel, export, or request worker-owned media deletion and idle cleanup while preserving history. Inspect the request to observe pending, completed or failed removal. Active Recovery requests wait durably for a planned checkpoint pause.",
-    usage: "rip-dvd damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup <identity> [--key <key>] [--json <input>|--stdin|--file <path>] [--timeout-ms <ms>] [--poll-ms <ms>] [--destination <path>]",
-    inputs: { arguments: ["availability|request|inspect|wait|cancel|export|delete|cleanup", "identity"], options: ["--json", "--stdin", "--file", "--key", "--timeout-ms", "--poll-ms", "--destination"] },
+    description: "Review and request checkpoint-bound Damage Previews; inspect, wait, cancel, export, or request worker-owned media deletion and idle cleanup while preserving history. Inspect the request to observe pending, completed or failed removal. Active Recovery requests wait durably for a planned checkpoint pause. Recreate without --key reviews retained evidence, optionally with {selection}; with --key submit {mode: exact|current_revision, recreationToken, preflightToken, selection?} as a new linked request.",
+    usage: "rip-dvd damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup|recreate <identity> [--key <key>] [--json <input>|--stdin|--file <path>] [--timeout-ms <ms>] [--poll-ms <ms>] [--destination <path>]",
+    inputs: { arguments: ["availability|request|inspect|wait|cancel|export|delete|cleanup|recreate", "identity"], options: ["--json", "--stdin", "--file", "--key", "--timeout-ms", "--poll-ms", "--destination"] },
     example: "rip-dvd damage-preview availability <archive-id>",
+    recreation: {
+      review: "rip-dvd damage-preview recreate <request-id> [--json '{\"selection\":{...}}']",
+      request: "rip-dvd damage-preview recreate <request-id> --key <key> --file <reviewed-request.json>",
+      input: { mode: ["exact", "current_revision"], recreationToken: "required", preflightToken: "required", selection: "required for current_revision; omitted for exact" },
+      result: "A new linked request; admission is not generation completion. Exact inputs do not promise byte-identical output or watchability.",
+    },
   },
   {
     name: "notifications",

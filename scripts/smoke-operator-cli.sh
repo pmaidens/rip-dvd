@@ -406,7 +406,23 @@ deleted_export_status=$?
 set -e
 [ "$deleted_export_status" -eq 2 ]
 printf '%s\n' "$deleted_export" | assert_json_fields 'error.code=DAMAGE_PREVIEW_MEDIA_DELETED'
-printf 'Installed read-only CLI admission, writable worker removal and replay passed.\n'
+# Historical preview media is gone; retained request evidence still supports
+# read-only recreation inspection, but this fixture has no proved source image.
+recreation_review="$(invoke damage-preview recreate "$preview_request")"
+printf '%s\n' "$recreation_review" | assert_json_fields 'schemaVersion=1' 'exact.available=false'
+recreation_input="$(printf '%s' "$recreation_review" | node --input-type=module -e '
+  let text = ""; for await (const chunk of process.stdin) text += chunk;
+  const review = JSON.parse(text);
+  if (!review.exact.reasons.some(reason => reason.code === "DAMAGE_PREVIEW_OLD_SOURCE_UNAVAILABLE")) process.exit(1);
+  process.stdout.write(JSON.stringify({ mode: "exact", recreationToken: review.recreationToken, preflightToken: review.preflight.preflightToken }));
+')"
+set +e
+recreation_unavailable="$(invoke damage-preview recreate "$preview_request" --key synthetic-installed-recreation-unavailable --json "$recreation_input")"
+recreation_status=$?
+set -e
+[ "$recreation_status" -eq 2 ]
+printf '%s\n' "$recreation_unavailable" | assert_json_fields 'error.code=DAMAGE_PREVIEW_EXACT_RECREATION_UNAVAILABLE'
+printf 'Installed read-only CLI admission, writable worker removal, replay and recreation inspection passed.\n'
 
 source_enqueue_help="$(invoke help encode-enqueue)"
 source_requeue_help="$(invoke help encode-requeue)"

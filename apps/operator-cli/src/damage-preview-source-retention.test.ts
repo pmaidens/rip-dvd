@@ -262,7 +262,7 @@ it.each(["checkpoint", "title", "path", "angle", "playback", "audio", "subtitles
     // Seed a separate historical request with its original differing evidence;
     // the original admitted request and its immutable provenance stay untouched.
     const historical = access.damagePreviews.submit({ archiveId: record.originalDiscArchiveId,
-      mutationKey: `synthetic-historical-${changed}`, preflightToken: `synthetic-historical-${changed}`, selectionJson: record.selectionJson }, () => JSON.stringify(saved));
+      mutationKey: `synthetic-historical-${changed}`, preflightToken: `synthetic-historical-${changed}`, selectionJson: record.selectionJson }, () => ({ reviewJson: JSON.stringify(saved) }));
     const retained = access.damagePreviews.claim("synthetic-historical-preview-worker")!;
     expect(retained.id).toBe(historical.id);
     const directory = join(fixture.mediaLibraryPath, ".damage-previews", retained.id);

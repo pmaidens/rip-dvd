@@ -85,7 +85,11 @@ export function createDamagePreviewGenerator(runner: HandBrakeRunner = nodeHandB
         execute("rip-dvd-handbrake", ["--version"], { timeout: 30_000, maxBuffer: 65_536 }),
         execute("ffprobe", ["-version"], { timeout: 30_000, maxBuffer: 65_536 }),
       ]);
-      return { pathVerifier: "dvd-preview-title-v1", handbrake: `${handbrake.stdout}\n${handbrake.stderr}`.trim(), ffprobe: ffprobe.stdout.split("\n")[0]! };
+      // HandBrake also writes timestamped startup diagnostics and thread addresses.
+      // Retain its version identity rather than treating those as tool changes.
+      const handbrakeVersion = `${handbrake.stdout}\n${handbrake.stderr}`.split(/\r?\n/).find((line) => /^HandBrake[ \t]+\d/.test(line));
+      if (!handbrakeVersion) throw new Error("HandBrake version identity is unavailable.");
+      return { pathVerifier: "dvd-preview-title-v1", handbrake: handbrakeVersion.trim(), ffprobe: ffprobe.stdout.split("\n")[0]! };
     },
     async scan({ source, titleNumber, angleNumber, chapterStart, chapterEnd, outputPath, descriptor, signal }) {
       const path = JSON.parse(await readPreviewTitle([source, String(titleNumber), String(angleNumber), String(chapterStart), String(chapterEnd), outputPath], descriptor, signal)) as Pick<PreviewSourceTitle, "navigation" | "selectedPath"> & { audio: Omit<DamagePreviewResolvedAudio, "trackNumber">[]; subtitles: Omit<DamagePreviewResolvedSubtitle, "trackNumber">[] };

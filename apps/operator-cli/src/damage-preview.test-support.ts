@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { cleanupDamagePreviewMedia, type DamagePreviewInspection } from "@rip-dvd/application";
 import { encodeOutputFilesystemIdentity } from "@rip-dvd/data-access";
 import { DatabaseSync } from "node:sqlite";
-import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { createArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { seedCommittedArchiveEvidence } from "./archive-evidence.test-support.js";
 import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
 
@@ -13,11 +13,11 @@ export async function seedDamagePreview(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
   coverage: "source_span" | "whole_cell" | "unknown" | "mixed" = "source_span",
   timings: readonly (readonly [number, number])[] = [[1_000, 5_000], [35_000, 40_000], [71_000, 400_000]],
-  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[]; singleChapter?: boolean; sourceExtent?: UnreadableSectorRange } = {},
+  options: { evidence?: { archive: Awaited<ReturnType<typeof seedCommittedArchiveEvidence>>["archive"]; manifest: CommittedDvdCheckpointEvidence }; ownership?: ArchiveImageOwnership; stopRecovery?: boolean; otherTitlePartial?: boolean; additionalTitleObservations?: readonly DvdTitleIdentityObservationInput[]; singleChapter?: boolean; sourceExtent?: UnreadableSectorRange } = {},
 ) {
   const { archive, manifest } = options.evidence ?? await seedCommittedArchiveEvidence(fixture, [
     { startLba: 10, sectorCount: 1, classification: "skipped_untested" },
-  ], false, true);
+  ], false, true, undefined, options.ownership);
   const sqlite = new DatabaseSync(fixture.databasePath);
   if (options.stopRecovery !== false) sqlite.prepare("UPDATE archive_recoveries SET status = 'stopped', stop_operation_id = 'synthetic-stop', stop_requested_at = 1, stopped_at = 1 WHERE original_disc_archive_id = ?").run(archive.id);
   const disc = sqlite.prepare("SELECT detected_disc_id FROM original_disc_archives WHERE id = ?").get(archive.id)!;
@@ -25,7 +25,7 @@ export async function seedDamagePreview(
   sqlite.prepare("UPDATE detected_discs SET scan_data = ? WHERE id = ?").run(JSON.stringify(scan), String(disc.detected_disc_id));
   sqlite.close();
   const access = fixture.openAccess();
-  const ownership = createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
+  const ownership = options.ownership ?? createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath });
   await access.assessDvdStructure(archive.id, ownership, async () => ({
     outcome: "completed",
     findings: (["filesystem_structure", "dvd_navigation", "title_enumeration"] as const).map((checkKind) => ({

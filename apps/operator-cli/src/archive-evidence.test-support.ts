@@ -22,7 +22,7 @@ import {
   type CommittedDvdCheckpointEvidence,
   type DvdUnrecoveredSourceRange,
 } from "@rip-dvd/data-access";
-import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { createArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { createOperatorWorkflowFixture, markArchiveWithDvdRecoveryEvidence, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
 
 export async function seedCommittedArchiveEvidence(
@@ -31,6 +31,7 @@ export async function seedCommittedArchiveEvidence(
   corrected = false,
   withRecovery = false,
   imageContents?: Uint8Array,
+  ownership?: ArchiveImageOwnership,
 ) {
   const { archive } = seedCatalogReviewForReadFixture(fixture);
   const archivePath = join(realpathSync(fixture.originalsLibraryPath), `${archive.id}.iso`);
@@ -109,9 +110,9 @@ export async function seedCommittedArchiveEvidence(
   const pointer = { originalDiscArchiveId: archive.id, currentManifestId: manifest.id, currentManifestRevision: 1, currentManifestDigest: manifest.manifestDigest, publicationDigest: manifest.publicationDigest };
   writeFileSync(join(directory, "initial-manifest.json"), canonicalPublicationJson(manifest));
   writeFileSync(join(directory, "checkpoint.json"), canonicalPublicationJson(pointer));
-  await createArchiveImageOwnership({
+  await (ownership ?? createArchiveImageOwnership({
     authorityRootPath: fixture.originalsLibraryPath,
-  }).withInitialPublicationWriter({
+  })).withInitialPublicationWriter({
     archiveId: archive.id,
     imagePath: archivePath,
     originalsLibraryPath: fixture.originalsLibraryPath,
