@@ -73,7 +73,10 @@ These contracts are also relevant to work on Encode Output playback:
   canonical deletion immediately revokes new derived-media access. After canonical
   deletion or proven absence, the rendition worker removes its owned MP4 directory
   under its execution lock, synchronizes the parent directory before committing
-  absence, and preserves request/conversion history. A source
+  absence, and preserves request/conversion history. Eligibility uses the exact
+  artifact's durable removal outcome even when deleting a sibling clip failed;
+  `previewCondition.canonicalMediaRemoved` reports this separately from the
+  aggregate canonical deletion status. A source
   becoming outdated alone does not remove or relabel its immutable provenance.
 
 Canonical exports and the existing Damage Preview generation, recreation and

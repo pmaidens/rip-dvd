@@ -65,3 +65,36 @@ it("revokes derived ranges when canonical deletion is admitted and removes worke
     expect(await fixture.run(["damage-preview", "inspect-rendition", seeded.request.id])).toMatchObject({ exitCode: 0, result: { status: "complete", media: null, source: { identity: seeded.identity }, previewCondition: { canonicalMedia: { state: "removed" } } } });
   } finally { access.close(); }
 });
+
+it("removes a derivative for its durably deleted clip even when deleting another canonical clip fails", async () => {
+  const { copyFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticPreviewRendition(fixture);
+  const access = fixture.openAccess();
+  try {
+    const record = access.damagePreviews.find(seeded.id)!;
+    const otherPath = join(dirname(seeded.path), "1.mkv");
+    copyFileSync(seeded.path, otherPath);
+    record.artifacts.push({ ...record.artifacts[0]!, identity: `damage-preview-v1.${seeded.id}.1`, path: otherPath });
+    access.damagePreviews.update(record);
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    const derivative = access.browserRenditions.find(seeded.request.id)!.media!.path;
+    const preview = await seeded.inspect();
+    expect(await fixture.run(["damage-preview", "delete", seeded.id, "--key", "synthetic-partial-removal", "--json", JSON.stringify({ mediaToken: preview.media.token })])).toMatchObject({ exitCode: 0 });
+    // The second file changes after deletion review. Its recorded identity no
+    // longer authorizes deletion, while the first clip can be removed safely.
+    writeFileSync(otherPath, "synthetic changed sibling clip");
+    settleDamagePreviewMedia(fixture);
+    expect(await seeded.inspect()).toMatchObject({ media: { removal: { state: "failed", outcomes: [
+      { identity: seeded.identity, outcome: "removed" },
+      { identity: `damage-preview-v1.${seeded.id}.1`, outcome: "failed" },
+    ] } } });
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    expect(existsSync(derivative)).toBe(false);
+    expect(existsSync(otherPath)).toBe(true);
+    expect(await fixture.run(["damage-preview", "inspect-rendition", seeded.request.id])).toMatchObject({ exitCode: 0, result: {
+      media: null, previewCondition: { canonicalMediaRemoved: true, canonicalMedia: { state: "removal_failed" } },
+    } });
+  } finally { access.close(); }
+});

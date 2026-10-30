@@ -36,7 +36,7 @@ export async function pollBrowserRenditions(options: Options) {
     // worker-owned bytes under the same execution lock before admitting work.
     for (const retained of options.access.browserRenditions.retainedPreviewMedia()) {
       const condition = inspectDamagePreviewRenditionCondition(options.access, retained.sourceIdentity);
-      if (["removed", "missing"].includes(condition.canonicalMedia.state)) {
+      if (condition.canonicalMediaRemoved) {
         await rm(join(root, retained.id), { recursive: true, force: true });
         // Commit durable absence before SQLite stops tracking these owned bytes.
         // If synchronization fails, leave the media record available for retry.

@@ -19,8 +19,11 @@ function retainedPreview(access: DataAccess, identity: unknown, targets?: Return
   const preview = describeDamagePreview(access, record, targets, false, null);
   return { record, artifact, preview, media: preview.artifacts.find((candidate) => candidate.identity === identity)!.media };
 }
-function previewCondition({ preview, media }: ReturnType<typeof retainedPreview>) {
-  return { status: preview.status, generationStatus: preview.generationStatus, outdated: preview.outdated,
+function previewCondition({ record, artifact, preview, media }: ReturnType<typeof retainedPreview>) {
+  const canonicalMediaRemoved = ["removed", "missing"].includes(media.state) ||
+    record.mediaRemoval?.outcomes.some((outcome) => outcome.identity === artifact.identity &&
+      ["removed", "already_missing"].includes(outcome.outcome)) === true;
+  return { canonicalMediaRemoved, status: preview.status, generationStatus: preview.generationStatus, outdated: preview.outdated,
     outdatedReasons: preview.outdatedReasons, reason: preview.reason, canonicalMedia: media, warning: preview.warning };
 }
 export function inspectDamagePreviewRenditionCondition(access: DataAccess, identity: string) {
