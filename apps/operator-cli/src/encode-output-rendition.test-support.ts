@@ -39,5 +39,5 @@ export async function requestSyntheticRendition(fixture: ReturnType<typeof creat
   const args = ["encode-output", "request-rendition", identity, "--key", "synthetic-rendition-request", "--json", JSON.stringify({ reviewToken: review.reviewToken, ...selection })];
   const admission = await fixture.run(args, undefined, undefined, options);
   if (admission.exitCode !== 0) throw new Error(JSON.stringify(admission.result));
-  return { identity, review, args, request: admission.result as ReturnType<typeof presentBrowserRendition> };
+  return { identity, review, args, request: admission.result as ReturnType<typeof presentBrowserRendition> & { source: BrowserRenditionAvailability["source"] } };
 }

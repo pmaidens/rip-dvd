@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { MutationKeyConflictError } from "../errors.js";
 import type { BrowserRenditionAccess, BrowserRenditionRecord, BrowserRenditionRequest } from "../browser-rendition.js";
 
-const operation = "encode-output-request-rendition";
+function operation(input: BrowserRenditionRequest) { return input.sourceKind === "damage_preview" ? "damage-preview-request-rendition" : "encode-output-request-rendition"; }
 function semanticInput(input: BrowserRenditionRequest) {
   // Leave the original no-subtitle shape intact for durable replay.
   return JSON.stringify({ sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken,
@@ -21,7 +21,7 @@ export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Da
   function replay(input: BrowserRenditionRequest) {
     const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
     if (!previous) return null;
-    if (previous.operation !== operation || previous.semantic_input !== semanticInput(input)) throw new MutationKeyConflictError();
+    if (previous.operation !== operation(input) || previous.semantic_input !== semanticInput(input)) throw new MutationKeyConflictError();
     return JSON.parse(String(previous.outcome)) as BrowserRenditionRecord;
   }
   function update(record: BrowserRenditionRecord) {
@@ -44,17 +44,18 @@ export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Da
         assertAuthority();
         const timestamp = now();
         const record: BrowserRenditionRecord = {
-          ...prepared, id: randomUUID(), sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken,
+          ...prepared, ...(input.sourceKind === undefined ? {} : { sourceKind: input.sourceKind }), id: randomUUID(), sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken,
           status: "queued", reason: null, progress: { percent: null }, command: [], toolVersion: null,
           media: null, durationCoverage: null, createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString(),
         };
         sqlite.prepare("INSERT INTO browser_renditions (id, source_identity, status, record, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(record.id, record.sourceIdentity, record.status, JSON.stringify(record), timestamp.getTime());
         sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)")
-          .run(input.mutationKey, operation, semanticInput(input), JSON.stringify(record), timestamp.getTime());
+          .run(input.mutationKey, operation(input), semanticInput(input), JSON.stringify(record), timestamp.getTime());
         return record;
       });
     },
+    retainedPreviewMedia: () => sqlite.prepare("SELECT record FROM browser_renditions WHERE json_extract(record, '$.sourceKind') = 'damage_preview' AND json_type(record, '$.media') = 'object'").all().map((row) => decode(row)!),
     active: () => sqlite.prepare("SELECT record FROM browser_renditions WHERE status IN ('queued', 'generating') ORDER BY created_at, id").all().map((row) => decode(row)!),
     claim() {
       return transaction(() => {

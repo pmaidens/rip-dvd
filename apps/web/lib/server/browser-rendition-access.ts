@@ -21,6 +21,6 @@ export function renditionError(error: unknown) {
   if (error instanceof InvalidBrowserRenditionInputError || error instanceof InvalidEncodeOutputArtifactIdentityError || error instanceof InvalidMutationKeyError) return renditionResponse({ error: { code: "INVALID_ARGUMENTS", message: error.message } }, 400);
   if (error instanceof MutationKeyConflictError) return renditionResponse({ error: { code: "MUTATION_KEY_CONFLICT", message: error.message } }, 409);
   if (error instanceof BrowserRenditionRejectedError) return renditionResponse({ error: { code: error.code, message: error.message, current: error.current } }, 409);
-  if (error instanceof RecordNotFoundError) return renditionResponse({ error: { code: "NOT_FOUND", message: "Encode Output or Browser Viewing Rendition not found." } }, 404);
+  if (error instanceof RecordNotFoundError) return renditionResponse({ error: { code: "NOT_FOUND", message: "Canonical media or Browser Viewing Rendition not found." } }, 404);
   return renditionResponse({ error: { code: "BROWSER_RENDITION_UNAVAILABLE", message: "Browser Viewing Rendition operation is unavailable." } }, 503);
 }

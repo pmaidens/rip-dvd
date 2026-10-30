@@ -4,15 +4,16 @@ import { lstat, open } from "node:fs/promises";
 import { browserRenditionConfig } from "@rip-dvd/config";
 import { canonicalPublicationJson, matchesEncodeOutputFilesystemIdentity, RecordNotFoundError, type BrowserRenditionRecord, type DataAccess } from "@rip-dvd/data-access";
 import { prepareEncodeOutputEvidenceCommit, inspectEncodeOutputEvidence, type EncodeOutputMediaProbe, type EncodeOutputMediaInspection } from "./encode-output-inspection.js";
-import { burnableSubtitleCodecs, planBrowserRendition } from "./browser-rendition-conversion.js";
+import { browserRenditionStreamReasons, planBrowserRendition } from "./browser-rendition-conversion.js";
+import { inspectDamagePreviewRenditionCondition, type DamagePreviewRenditionSource, type DamagePreviewRenditionAvailability } from "./damage-preview-rendition.js";
 import { parseMutationKey } from "./mutation-key.js";
 
 export class InvalidBrowserRenditionInputError extends Error {
   constructor() { super("A rendition identity and valid subtitle selection are required. Requests also require an exact review token and mutation key."); }
 }
 export class BrowserRenditionRejectedError extends Error {
-  constructor(readonly code: string, readonly current: BrowserRenditionAvailability | null = null) {
-    super(current?.reasons[0]?.message ?? "Browser Viewing Rendition is unavailable. Review the current output evidence.");
+  constructor(readonly code: string, readonly current: BrowserRenditionAvailability | DamagePreviewRenditionAvailability | null = null) {
+    super(current?.reasons[0]?.message ?? "Browser Viewing Rendition is unavailable. Review the current canonical media evidence.");
   }
 }
 function renditionMediaMatches(media: NonNullable<BrowserRenditionRecord["media"]>, metadata: Stats) {
@@ -24,18 +25,22 @@ function renditionMediaAvailability(media: NonNullable<BrowserRenditionRecord["m
       : { available: false as const, reasonCode: "RENDITION_MEDIA_IDENTITY_CHANGED" };
   } catch { return { available: false as const, reasonCode: "RENDITION_MEDIA_UNAVAILABLE" }; }
 }
-export function presentBrowserRendition(record: BrowserRenditionRecord) {
+export function presentBrowserRendition(record: BrowserRenditionRecord, access?: DataAccess) {
   const { sourceJson, sourceIdentity: _sourceIdentity, media, mediaProbeJson, ...details } = record;
+  const source = JSON.parse(sourceJson) as Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>["artifact"] | DamagePreviewRenditionSource;
+  const previewSource = "kind" in source && source.kind === "damage_preview";
+  const previewCondition = previewSource && access ? inspectDamagePreviewRenditionCondition(access, source.identity) : null;
   return {
     schemaVersion: 1 as const, ...details,
     type: "browser_viewing_rendition" as const,
-    source: JSON.parse(sourceJson) as Awaited<ReturnType<typeof inspectEncodeOutputEvidence>>["artifact"],
+    source,
+    previewCondition,
     actualMedia: mediaProbeJson ? JSON.parse(mediaProbeJson) as EncodeOutputMediaInspection : null,
-    playback: { kind: "ordinary" as const, damageSeek: null, watchability: "not_assessed" as const },
-    media: media === null ? null : { identity: media.identity, sizeBytes: media.sizeBytes, mediaType: "video/mp4" as const, availability: renditionMediaAvailability(media) },
+    playback: { kind: previewSource ? "damage_preview_sample" as const : "ordinary" as const, damageSeek: null, watchability: "not_assessed" as const },
+    media: media === null ? null : { identity: media.identity, sizeBytes: media.sizeBytes, mediaType: "video/mp4" as const, availability: previewCondition?.canonicalMedia.reasonCode ? { available: false as const, reasonCode: previewCondition.canonicalMedia.reasonCode } : renditionMediaAvailability(media) },
   };
 }
-function parseRenditionSelection(raw: unknown): number | null {
+export function parseRenditionSelection(raw: unknown): number | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.keys(raw).some((key) => key !== "burnSubtitleIndex")) throw new InvalidBrowserRenditionInputError();
   const index = (raw as Record<string, unknown>).burnSubtitleIndex;
   if (index === undefined) return null;
@@ -51,17 +56,7 @@ export async function inspectEncodeOutputRenditionAvailability(access: DataAcces
   if (source.file.identityContinuity !== "verified" || source.file.completeness !== "complete" || source.inspectability.status !== "inspected") {
     reasons.push({ code: source.inspectability.reasonCode ?? "OUTPUT_COMPLETE_IDENTITY_REQUIRED", message: source.inspectability.reason ?? "A complete Encode Output with recorded file identity is required." });
   }
-  const streams = source.media.streams ?? [];
-  const video = streams.filter((stream) => stream.kind === "video");
-  if (source.inspectability.status === "inspected") {
-    if (video.length !== 1) reasons.push({ code: "RENDITION_VIDEO_STREAM_UNSUPPORTED", message: "A rendition requires exactly one actual video stream." });
-    if (burnSubtitleIndex !== null) {
-      const subtitle = streams.find((stream) => stream.index === burnSubtitleIndex && stream.kind === "subtitle");
-      if (!subtitle) reasons.push({ code: "RENDITION_SUBTITLE_NOT_FOUND", message: "The selected subtitle is not present in the actual canonical output." });
-      else if (!burnableSubtitleCodecs.includes(subtitle.codecName ?? "")) reasons.push({ code: "RENDITION_SUBTITLE_CODEC_UNSUPPORTED", message: "The selected subtitle format cannot be burned into this rendition." });
-    }
-    if (source.media.durationSeconds === null || source.media.durationSeconds <= 0) reasons.push({ code: "RENDITION_DURATION_UNKNOWN", message: "The actual output duration is unavailable." });
-  }
+  if (source.inspectability.status === "inspected") reasons.push(...browserRenditionStreamReasons(source.media, burnSubtitleIndex));
   const conversion = planBrowserRendition(source.media.streams, burnSubtitleIndex);
   const reviewToken = createHash("sha256").update(canonicalPublicationJson({ policy: "encode-output-viewing-v2", inspection, burnSubtitleIndex, conversion })).digest("hex");
   return { schemaVersion: 1 as const, available: reasons.length === 0, reasons, reviewToken, source, conversion,
@@ -69,14 +64,18 @@ export async function inspectEncodeOutputRenditionAvailability(access: DataAcces
 }
 export type BrowserRenditionAvailability = Awaited<ReturnType<typeof inspectEncodeOutputRenditionAvailability>>;
 
-export async function requestEncodeOutputRendition(access: DataAccess, identity: unknown, raw: unknown, probe?: EncodeOutputMediaProbe, enabled = browserRenditionConfig().enabled) {
+export function parseRenditionRequest(identity: unknown, raw: unknown, sourceKind?: "damage_preview") {
   if (typeof identity !== "string" || typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new InvalidBrowserRenditionInputError();
   const body = raw as Record<string, unknown>;
   if (Object.keys(body).some((key) => !["mutationKey", "reviewToken", "burnSubtitleIndex"].includes(key)) || typeof body.reviewToken !== "string" || !/^[a-f0-9]{64}$/.test(body.reviewToken)) throw new InvalidBrowserRenditionInputError();
   const selection = body.burnSubtitleIndex === undefined ? {} : { burnSubtitleIndex: body.burnSubtitleIndex };
   const burnSubtitleIndex = parseRenditionSelection(selection);
-  const input = { sourceIdentity: identity, mutationKey: parseMutationKey(body.mutationKey), reviewToken: body.reviewToken,
+  const input = { sourceIdentity: identity, ...(sourceKind === undefined ? {} : { sourceKind }), mutationKey: parseMutationKey(body.mutationKey), reviewToken: body.reviewToken,
     ...(burnSubtitleIndex === null ? {} : { burnSubtitleIndex }) };
+  return { input, selection };
+}
+export async function requestEncodeOutputRendition(access: DataAccess, identity: unknown, raw: unknown, probe?: EncodeOutputMediaProbe, enabled = browserRenditionConfig().enabled) {
+  const { input, selection } = parseRenditionRequest(identity, raw);
   const replay = access.browserRenditions.replay(input);
   if (replay) return presentBrowserRendition(replay);
   let current: BrowserRenditionAvailability;
@@ -112,13 +111,17 @@ export function inspectBrowserRendition(access: DataAccess, id: unknown) {
   if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new InvalidBrowserRenditionInputError();
   const record = access.browserRenditions.find(id);
   if (!record) throw new RecordNotFoundError("Browser Viewing Rendition", id);
-  return presentBrowserRendition(record);
+  return presentBrowserRendition(record, access);
 }
 export async function openBrowserRendition(access: DataAccess, id: unknown, enabled = browserRenditionConfig().enabled) {
   if (!enabled) throw new BrowserRenditionRejectedError("BROWSER_RENDITIONS_DISABLED");
   inspectBrowserRendition(access, id);
   const record = access.browserRenditions.find(id as string)!;
   if (record.status !== "complete" || record.media === null) throw new BrowserRenditionRejectedError("RENDITION_MEDIA_UNAVAILABLE");
+  if (record.sourceKind === "damage_preview") {
+    const condition = inspectDamagePreviewRenditionCondition(access, record.sourceIdentity);
+    if (condition.canonicalMedia.reasonCode) throw new BrowserRenditionRejectedError(condition.canonicalMedia.reasonCode);
+  }
   const media = record.media;
   let file;
   try { file = await open(media.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -126,6 +129,12 @@ export async function openBrowserRendition(access: DataAccess, id: unknown, enab
   try {
     const held = await file.stat(), named = await lstat(media.path);
     if (!renditionMediaMatches(media, held) || !renditionMediaMatches(media, named)) throw new BrowserRenditionRejectedError("RENDITION_MEDIA_IDENTITY_CHANGED");
-    return { file, rendition: presentBrowserRendition(record), sizeBytes: held.size };
+    if (record.sourceKind === "damage_preview") {
+      const condition = inspectDamagePreviewRenditionCondition(access, record.sourceIdentity);
+      if (condition.canonicalMedia.reasonCode) throw new BrowserRenditionRejectedError(condition.canonicalMedia.reasonCode);
+      const requestId = (JSON.parse(record.sourceJson) as DamagePreviewRenditionSource).requestId;
+      if (!access.damagePreviews.touchMedia(requestId, record.sourceIdentity)) throw new BrowserRenditionRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE");
+    }
+    return { file, rendition: presentBrowserRendition(record, access), sizeBytes: held.size };
   } catch (error) { await file.close(); throw error; }
 }

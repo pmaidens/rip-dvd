@@ -1,5 +1,5 @@
 import type { BrowserRenditionRecord } from "@rip-dvd/data-access";
-import type { EncodeOutputMediaStream } from "./encode-output-inspection.js";
+import type { EncodeOutputMediaInspection, EncodeOutputMediaStream } from "./encode-output-inspection.js";
 
 export function browserVideoCanCopy(stream: EncodeOutputMediaStream) {
   return stream.codecName === "h264" && stream.pixelFormat === "yuv420p" &&
@@ -25,4 +25,17 @@ export function planBrowserRendition(streams: EncodeOutputMediaStream[] | null, 
     containerDifferences: ["MKV to fast-start MP4", "Container metadata and chapters omitted"],
     streams: converted, burnedSubtitle: subtitle ? { sourceIndex: subtitle.index, subtitleOrdinal: streams!.filter((stream) => stream.kind === "subtitle").findIndex((stream) => stream.index === subtitle.index), codecName: subtitle.codecName!, language: subtitle.language, title: subtitle.title, forced: subtitle.forced } : null,
   };
+}
+
+export function browserRenditionStreamReasons(media: { durationSeconds: number | null; streams: EncodeOutputMediaInspection["streams"] | null }, burnSubtitleIndex: number | null) {
+  const streams = media.streams ?? [];
+  const reasons: { code: string; message: string }[] = [];
+  if (streams.filter((stream) => stream.kind === "video").length !== 1) reasons.push({ code: "RENDITION_VIDEO_STREAM_UNSUPPORTED", message: "A rendition requires exactly one actual video stream." });
+  if (burnSubtitleIndex !== null) {
+    const subtitle = streams.find((stream) => stream.index === burnSubtitleIndex && stream.kind === "subtitle");
+    if (!subtitle) reasons.push({ code: "RENDITION_SUBTITLE_NOT_FOUND", message: "The selected subtitle is not present in the actual canonical media." });
+    else if (!burnableSubtitleCodecs.includes(subtitle.codecName ?? "")) reasons.push({ code: "RENDITION_SUBTITLE_CODEC_UNSUPPORTED", message: "The selected subtitle format cannot be burned into this rendition." });
+  }
+  if (media.durationSeconds === null || media.durationSeconds <= 0) reasons.push({ code: "RENDITION_DURATION_UNKNOWN", message: "The actual canonical media duration is unavailable." });
+  return reasons;
 }

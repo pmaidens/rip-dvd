@@ -343,6 +343,17 @@ process.stdout.write(JSON.stringify({ identity, sha256, sizeBytes: bytes.length 
 JAVASCRIPT
 )"
 preview_identity="$(printf '%s' "$preview_fixture" | node -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).identity)' --input-type=module)"
+# Preview renditions use the same installed operation, independently of canonical export.
+export RIP_DVD_BROWSER_RENDITIONS_ENABLED=true
+preview_rendition_availability="$(invoke damage-preview rendition-availability "$preview_identity")"
+printf '%s\n' "$preview_rendition_availability" | assert_json_fields 'available=true' 'source.kind=damage_preview' 'conversion.kind=h264_aac_transcode'
+preview_rendition_review="$(printf '%s' "$preview_rendition_availability" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.stringify({reviewToken:JSON.parse(t).reviewToken}))')"
+preview_rendition_request="$(invoke damage-preview request-rendition "$preview_identity" --key synthetic-installed-preview-rendition --json "$preview_rendition_review")"
+printf '%s\n' "$preview_rendition_request" | assert_json_fields 'status=queued' 'source.kind=damage_preview' 'playback.kind=damage_preview_sample' 'playback.watchability=not_assessed'
+[ "$(invoke damage-preview request-rendition "$preview_identity" --key synthetic-installed-preview-rendition --json "$preview_rendition_review")" = "$preview_rendition_request" ]
+preview_rendition_id="$(printf '%s' "$preview_rendition_request" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.parse(t).id)')"
+[ "$(invoke damage-preview inspect-rendition "$preview_rendition_id")" = "$preview_rendition_request" ]
+unset RIP_DVD_BROWSER_RENDITIONS_ENABLED
 preview_export="$(invoke damage-preview export "$preview_identity" --destination "$temporary_directory/caller-preview.mkv")"
 printf '%s\n' "$preview_export" | assert_json_fields \
   "artifactIdentity=$preview_identity" 'mediaType=video/x-matroska' \

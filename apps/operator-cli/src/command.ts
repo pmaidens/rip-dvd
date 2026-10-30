@@ -1,4 +1,4 @@
-import { runEncodeOutputRendition } from "./encode-output-rendition.js";
+import { runBrowserRendition } from "./encode-output-rendition.js";
 import { runNotifications } from "./notifications.js";
 import { runDamagePreview } from "./damage-preview.js";
 import { readStructuredObject, StructuredInputError } from "./structured-input.js";
@@ -155,9 +155,10 @@ const commandDefinitions = [
   {
     name: "damage-preview",
     description: "Review and request checkpoint-bound Damage Previews; inspect, wait, cancel, export, or request worker-owned media deletion and idle cleanup while preserving history. Inspect the request to observe pending, completed or failed removal. Active Recovery requests wait durably for a planned checkpoint pause. Recreate without --key reviews retained evidence, optionally with {selection}; with --key submit {mode: exact|current_revision, recreationToken, preflightToken, selection?} as a new linked request.",
-    usage: "rip-dvd damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup|recreate <identity> [--key <key>] [--json <input>|--stdin|--file <path>] [--timeout-ms <ms>] [--poll-ms <ms>] [--destination <path>]",
-    inputs: { arguments: ["availability|request|inspect|wait|cancel|export|delete|cleanup|recreate", "identity"], options: ["--json", "--stdin", "--file", "--key", "--timeout-ms", "--poll-ms", "--destination"] },
+    usage: "rip-dvd damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup|recreate|rendition-availability|request-rendition|inspect-rendition <identity> [--key <key>] [--json <input>|--stdin|--file <path>] [--timeout-ms <ms>] [--poll-ms <ms>] [--destination <path>]",
+    inputs: { arguments: ["availability|request|inspect|wait|cancel|export|delete|cleanup|recreate|rendition-availability|request-rendition|inspect-rendition", "identity"], options: ["--json", "--stdin", "--file", "--key", "--timeout-ms", "--poll-ms", "--destination"] },
     example: "rip-dvd damage-preview availability <archive-id>",
+    rendition: { identity: "damage-preview-v1.<request-id>.<clip-index>; inspect-rendition takes the rendition request ID", request: "--key <key> --json {reviewToken, burnSubtitleIndex?}; review with rendition-availability using the same subtitle selection" },
     recreation: {
       review: "rip-dvd damage-preview recreate <request-id> [--json '{\"selection\":{...}}']",
       request: "rip-dvd damage-preview recreate <request-id> --key <key> --file <reviewed-request.json>",
@@ -1721,7 +1722,7 @@ async function encodeOutputCommand(
   io: CommandIO,
 ) {
   const [action, artifactIdentity] = rest;
-  if (["rendition-availability", "request-rendition", "inspect-rendition"].includes(action ?? "")) return runEncodeOutputRendition(rest, io);
+  if (["rendition-availability", "request-rendition", "inspect-rendition"].includes(action ?? "")) return runBrowserRendition(rest, io);
   if (
     (action !== "inspect" && action !== "export" && action !== "acknowledge-inspection" && action !== "intervals" && action !== "keep-preflight" && action !== "keep") ||
     artifactIdentity === undefined ||

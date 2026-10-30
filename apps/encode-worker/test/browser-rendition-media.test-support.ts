@@ -27,7 +27,7 @@ function syntheticBitmapSubtitle() {
   ]);
 }
 export type SyntheticViewingVariant = "compatible" | "incompatible" | "audio_conversion" | "video_format" | "subtitles";
-export function createSyntheticViewingSource(directory: string, variant: SyntheticViewingVariant) {
+export function createSyntheticViewingSource(directory: string, variant: SyntheticViewingVariant, durationSeconds = 3) {
   const source = join(directory, `synthetic-${variant}.mkv`);
   const args = ["-copyts", "-nostdin", "-v", "error", "-n", "-f", "lavfi", "-i", "color=c=black:size=160x90:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"];
   if (variant === "subtitles") {
@@ -39,7 +39,7 @@ export function createSyntheticViewingSource(directory: string, variant: Synthet
   args.push("-map", "0:v:0", "-map", "1:a:0");
   if (variant === "subtitles") args.push("-map", "2:s:0", "-map", "3:s:0", "-c:s:0", "dvdsub", "-c:s:1", "srt", "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=Synthetic bitmap captions", "-metadata:s:s:1", "language=fra", "-metadata:s:s:1", "title=Synthetic text captions");
   const incompatible = variant === "incompatible" || variant === "subtitles";
-  args.push("-t", "3", "-c:v", incompatible ? "mpeg2video" : "libx264", "-threads:v", "1");
+  args.push("-t", String(durationSeconds), "-c:v", incompatible ? "mpeg2video" : "libx264", "-threads:v", "1");
   if (!incompatible) args.push("-profile:v", variant === "video_format" ? "high10" : "high", "-level:v", "4.1");
   args.push("-pix_fmt", variant === "video_format" ? "yuv420p10le" : "yuv420p", "-c:a", incompatible || variant === "audio_conversion" ? "ac3" : "aac", "-metadata:s:a:0", "language=eng", source);
   execFileSync("ffmpeg", args, { stdio: "pipe" });
