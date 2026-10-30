@@ -205,7 +205,7 @@ for (const state of ["verified", "absent", "unknown", "changed_on_seek"] as cons
       await expect(panel).toContainText("Canonical seek target: 1.1 seconds");
       await expect(panel).toContainText("Rendition seek target: 1.2 seconds");
       await seek.click();
-      expect(checks).toBe(2);
+      await expect.poll(() => checks).toBe(2);
       if (state === "verified") {
         await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1.2, 1);
         await expect(panel).toContainText("Seek requested at 1.2 seconds");
