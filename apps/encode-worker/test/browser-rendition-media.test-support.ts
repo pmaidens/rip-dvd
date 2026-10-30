@@ -29,7 +29,7 @@ function syntheticBitmapSubtitle() {
 export type SyntheticViewingVariant = "compatible" | "incompatible" | "audio_conversion" | "video_format" | "subtitles";
 export function createSyntheticViewingSource(directory: string, variant: SyntheticViewingVariant) {
   const source = join(directory, `synthetic-${variant}.mkv`);
-  const args = ["-nostdin", "-v", "error", "-n", "-f", "lavfi", "-i", "color=c=black:size=160x90:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"];
+  const args = ["-copyts", "-nostdin", "-v", "error", "-n", "-f", "lavfi", "-i", "color=c=black:size=160x90:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"];
   if (variant === "subtitles") {
     const bitmap = join(directory, "synthetic-captions.sup"), text = join(directory, "synthetic-captions.srt");
     writeFileSync(bitmap, syntheticBitmapSubtitle());
@@ -43,5 +43,12 @@ export function createSyntheticViewingSource(directory: string, variant: Synthet
   if (!incompatible) args.push("-profile:v", variant === "video_format" ? "high10" : "high", "-level:v", "4.1");
   args.push("-pix_fmt", variant === "video_format" ? "yuv420p10le" : "yuv420p", "-c:a", incompatible || variant === "audio_conversion" ? "ac3" : "aac", "-metadata:s:a:0", "language=eng", source);
   execFileSync("ffmpeg", args, { stdio: "pipe" });
+  if (variant === "subtitles") {
+    // Raw PGS begins at its first packet. Preserve that offset when muxing it
+    // beside zero-based video, then prove both fixture cues share the intended
+    // half-second start and two-second duration before testing the renderer.
+    const probe = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-select_streams", "s", "-show_entries", "packet=stream_index,pts_time,duration_time", "-of", "json", source], { encoding: "utf8" })) as { packets?: { stream_index: number; pts_time: string; duration_time: string }[] };
+    if (![2, 3].every((index) => probe.packets?.some((packet) => packet.stream_index === index && Number(packet.pts_time) === 0.5 && Number(packet.duration_time) === 2))) throw new Error("Synthetic subtitle fixture timing does not match its intended cues.");
+  }
   return source;
 }
