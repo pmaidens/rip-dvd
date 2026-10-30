@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const listDamagePreviews = vi.fn();
+const listActiveBrowserRenditions = vi.fn();
 const listOpticalDrives = vi.fn();
 const listInspections = vi.fn();
 const listArchiveRequests = vi.fn();
@@ -14,6 +15,7 @@ const readConsistentSnapshot = vi.fn((read: (access: unknown) => unknown) =>
   read({
     catalog: { listOpticalDrives },
     damagePreviews: { list: listDamagePreviews },
+    browserRenditions: { active: listActiveBrowserRenditions },
     discInspections: { list: listInspections },
     archiveRequests: { list: listArchiveRequests },
     archiveJobs: { list: listArchiveJobs },
@@ -46,6 +48,7 @@ describe("GET /api/deployment-readiness", () => {
       },
     ]);
     listDamagePreviews.mockReturnValue([]);
+    listActiveBrowserRenditions.mockReturnValue([]);
     listInspections.mockReturnValue([]);
     listArchiveRequests.mockReturnValue([]);
     listArchiveJobs.mockReturnValue([]);
@@ -62,6 +65,10 @@ describe("GET /api/deployment-readiness", () => {
     ]);
     listEncodeJobs.mockReturnValue([{ id: "encode-1", status: "running" }]);
     listDamagePreviews.mockReturnValue([{ id: "preview-1", status: "generating" }, { id: "preview-2", status: "complete" }]);
+    listActiveBrowserRenditions.mockReturnValue([
+      { id: "synthetic-queued-rendition", status: "queued" },
+      { id: "synthetic-generating-rendition", status: "generating" },
+    ]);
     listDvdRecoveryReconciliations.mockReturnValue([{
       id: "reconciliation-1",
       status: "queued",
@@ -91,6 +98,8 @@ describe("GET /api/deployment-readiness", () => {
         },
       },
       activeWork: [
+        { kind: "browser_rendition", id: "synthetic-queued-rendition", status: "queued" },
+        { kind: "browser_rendition", id: "synthetic-generating-rendition", status: "generating" },
         { kind: "damage_preview", id: "preview-1", status: "generating" },
         {
           kind: "archive_request",
@@ -120,6 +129,7 @@ describe("GET /api/deployment-readiness", () => {
       "cancellation_requested",
     ]);
     expect(listDvdRecoveryReconciliations).toHaveBeenCalledWith();
+    expect(listActiveBrowserRenditions).toHaveBeenCalledWith();
   });
 
   it("fails closed when any readiness query fails", async () => {

@@ -24,6 +24,9 @@ it("requests a distinct durable rendition through the public CLI and replays the
   expect(requested.result).toMatchObject({ status: "queued", source: { identity }, conversion: { kind: "stream_copy_remux", container: "mp4" } });
   expect((await fixture.run(args)).result).toEqual(requested.result);
   const id = (requested.result as { id: string }).id;
+  expect((await fixture.run(["readiness"])).result).toMatchObject({
+    activeWork: [{ kind: "browser_rendition", id, status: "queued" }],
+  });
   expect((await fixture.run(["encode-output", "inspect-rendition", id])).result).toEqual(requested.result);
   const conflict = await fixture.run([...args.slice(0, -1), JSON.stringify({ reviewToken: "a".repeat(64) })], undefined, undefined, options);
   expect(conflict.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
