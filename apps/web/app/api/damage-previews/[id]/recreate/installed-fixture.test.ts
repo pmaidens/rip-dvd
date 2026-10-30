@@ -27,5 +27,5 @@ it.skipIf(process.env.RIP_DVD_RECREATION_INSTALLED_FIXTURE !== "1")("prepares an
   const seeded = await seedRetainedDamagePreview(fixture);
   const original = await seeded.inspect();
   expect(original.generationStatus).toBe("complete"); expect(original.media.state).toBe("retained");
-  writeFileSync(join(dirname(config.databasePath), "synthetic-recreation-fixture.json"), JSON.stringify({ id: seeded.id, selection: seeded.seeded.input, original }), { flag: "wx", mode: 0o600 });
+  writeFileSync(join(dirname(config.databasePath), "synthetic-recreation-fixture.json"), JSON.stringify({ id: seeded.id, mediaPath: seeded.path, selection: seeded.seeded.input, original }), { flag: "wx", mode: 0o600 });
 });

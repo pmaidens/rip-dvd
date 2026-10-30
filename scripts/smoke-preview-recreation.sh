@@ -62,6 +62,25 @@ fixture_path="$temporary_directory/fixture.json"
 docker compose run --rm --no-deps --no-TTY --entrypoint node encode-worker --input-type=module -e \
   'import{readFileSync}from"node:fs";process.stdout.write(readFileSync("/data/synthetic-recreation-fixture.json","utf8"))' > "$fixture_path"
 request_id="$(node --input-type=module -e 'import{readFileSync}from"node:fs";process.stdout.write(JSON.parse(readFileSync(process.argv[1],"utf8")).id)' "$fixture_path")"
+media_path="$(node --input-type=module -e 'import{readFileSync}from"node:fs";process.stdout.write(JSON.parse(readFileSync(process.argv[1],"utf8")).mediaPath)' "$fixture_path")"
+probe_media() {
+  docker compose run --rm --no-deps --no-TTY --entrypoint node encode-worker --input-type=module - "$media_path" "$request_id" "$1" <<'JAVASCRIPT'
+import assert from 'node:assert/strict';
+import { lstatSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadConfig } from './apps/encode-worker/node_modules/@rip-dvd/config/dist/index.js';
+const [path, requestId, state] = process.argv.slice(2);
+assert.equal(path, join(loadConfig().mediaLibraryPath, '.damage-previews', requestId, '0.mkv'));
+if (state === 'present') {
+  const file = lstatSync(path);
+  assert.ok(file.isFile() && file.size > 0, 'Synthetic media must exist before deletion');
+} else {
+  assert.equal(state, 'absent');
+  assert.throws(() => lstatSync(path), { code: 'ENOENT' });
+}
+JAVASCRIPT
+}
+probe_media present
 state="$("$installed_cli" damage-preview inspect "$request_id")"
 input="$(printf '%s' "$state" | node --input-type=module -e 'let t="";for await(const c of process.stdin)t+=c;process.stdout.write(JSON.stringify({mediaToken:JSON.parse(t).media.token}))')"
 accepted="$("$installed_cli" damage-preview delete "$request_id" --key synthetic-installed-roundtrip-delete --json "$input")"
@@ -75,6 +94,7 @@ while [ "$attempt" -lt 30 ]; do
 done
 [ "$attempt" -lt 30 ]
 docker compose stop --timeout 10 encode-worker
+probe_media absent
 replayed="$("$installed_cli" damage-preview delete "$request_id" --key synthetic-installed-roundtrip-delete --json "$input")"
 [ "$accepted" = "$replayed" ]
 node scripts/validation/verify-preview-recreation-installed.mjs "$installed_cli" "$fixture_path"
