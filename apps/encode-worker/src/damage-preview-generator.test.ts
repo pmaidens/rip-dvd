@@ -1,9 +1,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
+import { authorSyntheticPreviewDvd } from "./synthetic-preview-dvd.test-support.js";
 import { createDamagePreviewGenerator, DamagePreviewUnrepresentableError } from "./damage-preview-generator.js";
 
 const roots: string[] = [];
@@ -12,21 +13,7 @@ const available = process.platform === "linux" && ["ffmpeg", "dvdauthor", "genis
 it.skipIf(!available)("scans a synthetic DVD and generates a playable canonical MKV with the selected source interval and intended preset", async () => {
   const root = mkdtempSync(join(tmpdir(), "preview-media-")); roots.push(root);
   const originals = join(root, "originals"); mkdirSync(originals);
-  const source = join(originals, "synthetic.iso");
-  const video = join(root, "video.mpg");
-  const dvd = join(root, "dvd");
-  const run = (command: string, args: string[]) => execFileSync(command, args, { stdio: "pipe", env: { ...process.env, VIDEO_FORMAT: "NTSC" } });
-  run("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=720x480:r=30000/1001", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "4", "-target", "ntsc-dvd", "-ac", "2", "-threads", "1", video]);
-  const subtitle = join(root, "subtitle.png");
-  run("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=black:s=160x32,drawbox=x=4:y=4:w=152:h=24:color=white:t=fill", "-frames:v", "1", "-threads", "1", subtitle]);
-  const subtitles = join(root, "subtitles.xml"), subtitled = join(root, "subtitled.mpg"), authoring = join(root, "dvd.xml");
-  writeFileSync(subtitles, `<subpictures><stream><spu start="00:00:00.500" end="00:00:02.500" image="${subtitle}" xoffset="280" yoffset="400" /></stream></subpictures>`);
-  const videoInput = openSync(video, "r"), subtitleOutput = openSync(subtitled, "wx");
-  try { execFileSync("spumux", [subtitles], { stdio: [videoInput, subtitleOutput, "pipe"] }); }
-  finally { closeSync(videoInput); closeSync(subtitleOutput); }
-  writeFileSync(authoring, `<dvdauthor dest="${dvd}"><vmgm /><titleset><titles><video format="ntsc" aspect="4:3" /><audio lang="en" /><subpicture lang="fr" /><pgc><vob file="${subtitled}" /></pgc></titles></titleset></dvdauthor>`);
-  run("dvdauthor", ["-x", authoring]);
-  run("genisoimage", ["-quiet", "-dvd-video", "-udf", "-o", source, dvd]);
+  const source = authorSyntheticPreviewDvd(root, originals);
   const ownership = createArchiveImageOwnership({ authorityRootPath: root });
   const base = { archiveId: "synthetic-preview-media", imagePath: source, originalsLibraryPath: originals, signal: new AbortController().signal };
   await ownership.withInitialPublicationWriter({ ...base, async task() {} });

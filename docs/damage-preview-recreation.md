@@ -107,3 +107,42 @@ and oldest-waiter ownership across process and container boundaries. The linked
 request uses the same generator and ownership path. Full image builds and these
 native/process/installed checks belong to that coordinated lane. Record their
 actual results before delivery; authored checks are not execution evidence.
+
+The queued command and evidence contract is executable without starting a gate:
+
+```sh
+node scripts/validation/preview-recreation-plan.mjs --check
+```
+
+This prints JSON only. Every gate remains `queued`; file discovery is not
+execution evidence. Record exact source revision, runtime/image provenance,
+commands, exit status, counts, skips and private raw output when a coordinator
+later grants the lane. The existing full-check, browser, HTTP parity, native
+stream and ownership scripts remain in that plan.
+
+`apps/web/app/api/damage-previews/[id]/recreate/native-roundtrip.test.ts`
+adds a real two-generation workflow. Run it in the Linux native lane with
+`RIP_DVD_RECREATION_NATIVE_TEST=1`. It authors a small synthetic DVD, submits
+and generates a sample, admits deletion, proves worker unlink and old-export
+absence, recreates a distinct linked request, exports and decodes the new MKV,
+and verifies unchanged source bytes and original history. Missing native
+prerequisites fail an opted-in run. A default skip is not native evidence.
+The shared DVD authoring fixture preserves the existing native stream test.
+
+`scripts/smoke-preview-recreation.sh` adds successful installed exact and
+current-revision admission after configured-worker deletion. Supply already
+built, source-proven validation, operator CLI and Encode-worker images through
+`RIP_DVD_RECREATION_VALIDATION_IMAGE`, `RIP_DVD_RECREATION_CLI_IMAGE` and
+`RIP_DVD_RECREATION_WORKER_IMAGE`. It inspects those images before starting,
+uses an isolated random Compose project and a synthetic-volume sentinel, and
+performs no build, pull or image cleanup. The installed wrapper checks replay,
+conflict, stale rejection, cancellation and preserved history. This gate does
+not claim regenerated-media evidence; the native roundtrip owns that assertion.
+The existing installed smoke still covers canonical caller export and missing
+source proof. Both installed gates remain required for this recreation slice.
+
+The installed assertion program is
+`scripts/validation/verify-preview-recreation-installed.mjs`.
+Its public-runner persistence test and the sentinel-protected fixture writer
+can be checked locally without Docker or native media. Their success verifies
+the harness and fixture, not the installed container workflow.
