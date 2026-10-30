@@ -57,3 +57,25 @@ it.each([false, true])("reports changed resolved generation flags with identical
     else expect(differences).toEqual([]);
   } finally { access.close(); }
 });
+
+it.each(["HandBrake 1.9.2", "HandBrake 1.10.0"])("compares retained HandBrake version identities without rewriting historical diagnostics: %s", async (version) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { id, inspect } = await seedRetainedDamagePreview(fixture);
+  const access = fixture.openAccess();
+  try {
+    const original = access.damagePreviews.find(id)!;
+    original.toolVersions = { handbrake: "HandBrake 1.9.2\n[01:02:03] hb_init: starting libhb thread\n[01:02:03] thread abc123 started (\"libhb\")\nHandBrake has exited.", ffprobe: "synthetic-probe-v1" };
+    access.damagePreviews.update(original);
+    const history = await inspect();
+    const review = (await fixture.run(["damage-preview", "recreate", id])).result as DamagePreviewRecreationReview;
+    const requested = await fixture.run(["damage-preview", "recreate", id, "--key", "synthetic-retained-tool-version", "--json", JSON.stringify({ mode: "exact", recreationToken: review.recreationToken, preflightToken: review.preflight.preflightToken })]);
+    expect(requested.exitCode).toBe(0);
+    await pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal,
+      generator: { ...media(), async versions() { return { handbrake: version, ffprobe: "synthetic-probe-v1" }; } }, ownership: createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }) });
+    const inspected = (await fixture.run(["damage-preview", "inspect", (requested.result as { id: string }).id])).result as DamagePreviewInspection;
+    expect(inspected.generationStatus).toBe("complete");
+    const tools = inspected.recreation!.generationDifferences.filter((difference) => difference.field === "toolVersions");
+    expect(tools).toEqual(version === "HandBrake 1.9.2" ? [] : [{ field: "toolVersions", before: original.toolVersions, after: { handbrake: version, ffprobe: "synthetic-probe-v1" } }]);
+    expect(await inspect()).toEqual(history);
+  } finally { access.close(); }
+});

@@ -50,6 +50,11 @@ function commandSemantics(commands: string[][]) {
     index > 0 && ["-o", "--output"].includes(command[index - 1]!) ? "<preview-output>" : argument.startsWith("--output=") ? "--output=<preview-output>" : argument));
 }
 
+function toolVersionIdentities(versions: Record<string, string>) {
+  const handbrake = versions.handbrake?.split(/\r?\n/).find((line) => /^HandBrake[ \t]+\d/.test(line));
+  return handbrake ? { ...versions, handbrake: handbrake.trim() } : versions;
+}
+
 export function presentDamagePreviewRecreation(record: DamagePreviewRecord) {
   const recreation = record.recreation;
   if (!recreation) return null;
@@ -61,7 +66,9 @@ export function presentDamagePreviewRecreation(record: DamagePreviewRecord) {
   const toolsRecorded = Object.keys(record.toolVersions).length > 0;
   if (toolsRecorded && !active) {
     compare("resolvedCommands", commandSemantics(recreation.originalCommands), commandSemantics(record.commands));
-    compare("toolVersions", recreation.originalToolVersions, record.toolVersions);
+    if (canonicalPublicationJson(toolVersionIdentities(recreation.originalToolVersions)) !== canonicalPublicationJson(toolVersionIdentities(record.toolVersions))) {
+      differences.push({ field: "toolVersions", before: recreation.originalToolVersions, after: record.toolVersions });
+    }
     compare("streamMapping", recreation.originalStreamMapping, record.streamMapping);
     compare("sampleDeviations", recreation.originalDeviations, record.deviations);
   }
