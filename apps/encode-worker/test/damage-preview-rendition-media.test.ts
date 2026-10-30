@@ -41,7 +41,7 @@ it.skipIf(process.env.RIP_DVD_TEST_PREVIEW_RENDITION_MEDIA !== "true").each([
     else expect(Math.max(...visible)).toBeGreaterThan(180);
     const destination = join(fixture.operatorHostPath, "canonical-export.mkv");
     expect(await fixture.run(["damage-preview", "export", seeded.identity, "--destination", destination])).toMatchObject({ exitCode: 0 });
-    expect(readFileSync(destination)).toEqual(canonicalBytes);
+    expect(readFileSync(destination).equals(canonicalBytes)).toBe(true);
   } finally { access.close(); }
 });
 it.skipIf(process.env.RIP_DVD_TEST_PREVIEW_RENDITION_MEDIA !== "true")("reports a real preview conversion process failure without playable media", async () => {
