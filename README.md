@@ -1795,3 +1795,9 @@ Linux, then supply the generated private `seeded.json` through
 External mode requires `RIP_DVD_RENDITION_BROWSER_GATE=true` and does not start
 or reseed that server. This lets an installed stable Chrome browser inspect the
 same Linux-produced rendition without substituting an emulated browser.
+Serve the external fixture through `test/browser/rendition-fault-proxy.mjs`,
+with `RIP_DVD_RENDITION_BROWSER_UPSTREAM` pointing to the isolated production
+server. The opt-in proxy preserves endpoint authorization and injects real HTTP
+416 responses for the error case, including native media loaders that bypass
+browser request interception. Audio analysis uses a separate page because Web
+Audio reroutes the media element's audio.
