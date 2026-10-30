@@ -36,6 +36,7 @@ export interface DamagePreviewRecreation {
   sourceRequestId: string;
   mode: "exact" | "current_revision";
   differences: DamagePreviewRecreationDifference[];
+  originalCommands: string[][];
   originalToolVersions: Record<string, string>;
   originalStreamMapping: DamagePreviewStreamMapping | null;
   originalDeviations: string[];

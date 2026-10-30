@@ -60,8 +60,11 @@ source changes or generation; changed semantic input conflicts with the key.
 
 Web and JSON CLI use the same operations. The Damage Preview panel's Review
 recreation action works with the retained request identity. It displays exact
-availability, differences, and an explicit exact request button. To use current
-inputs, review selections in the availability form, inspect the updated
+availability, differences, and an explicit exact request button. Recreation
+review refreshes current title and profile choices; a vanished title observation
+requires an explicit current choice. Refreshing availability invalidates the
+prior selection review while preserving the historical recreation link. To use
+current inputs, review selections in the availability form, inspect the updated
 differences, then select Request linked current-revision sample.
 `GET /api/damage-previews/<request-id>/recreate` inspects original selections.
 `POST` with `mode: "review"` and a proposed `selection` inspects differences;
@@ -72,7 +75,9 @@ The linked request follows ordinary preview ownership, planned Recovery pause,
 Recovery Stop priority, cancellation, worker restart and retention rules.
 Generation records current tool versions, resolved commands, stream mapping,
 coverage and sample deviations. `recreation.generationDifferences` compares
-recorded tool versions, stream mapping and deviations with the original.
+recorded resolved-command semantics, tool versions, stream mapping and deviations
+with the original. Expected request-specific output paths are excluded from
+command comparison; source and generation flags remain visible.
 Before generation this comparison is pending. Exact inputs do not promise
 byte-identical output or watchability. A new request never changes Title Damage
 Acceptance, output correspondence, Keep or admission of new-format archives.

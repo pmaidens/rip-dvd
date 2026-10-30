@@ -31,13 +31,14 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
   const title = availability?.titles.find((item) => item.observationId === titleId);
 
   async function load(): Promise<void> {
+    if (recreation) { await reviewRecreation(); return; }
     setBusy(true);
     setError(null);
     try {
       const response = await fetch(endpoint, { cache: "no-store" });
       if (!response.ok) throw new Error("Damage Preview availability could not be loaded.");
       const result: DamagePreviewAvailability = await response.json();
-      setAvailability(result);
+      setAvailability(result); setReview(null); setRecreation(null); setSelected([]);
       setTitleId(result.titles[0]?.observationId ?? "");
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "Damage Preview availability could not be loaded.");
@@ -126,7 +127,10 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
       const response = await fetch(`/api/damage-previews/${encodeURIComponent(requestId)}/recreate`, { cache: "no-store" });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error?.message ?? "Recreation could not be reviewed.");
-      setRecreation(result);
+      const refreshed: DamagePreviewRecreationReview = result;
+      setRecreation(refreshed); setAvailability(refreshed.preflight);
+      if (!refreshed.preflight.titles.some((item) => item.observationId === titleId)) { setTitleId(""); setSelected([]); }
+      else if (availability?.current.assessmentIdentity !== refreshed.preflight.current.assessmentIdentity) setSelected([]);
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Recreation could not be reviewed."); }
     finally { setBusy(false); }
   }
@@ -167,7 +171,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
     <section className="catalog-pane" aria-label="Damage Preview">
       <h3>Damage Preview</h3>
       <p>Generate a canonical MKV sample from one saved checkpoint, including before catalog mapping. During active Recovery, the request waits for a planned pause. Reviewing does not request work or accept damage.</p>
-      {availability === null ? <button type="button" disabled={busy} onClick={() => void load()}>Review preview availability</button> : null}
+      <button type="button" disabled={busy} onClick={() => void load()}>{availability === null ? "Review preview availability" : "Refresh preview availability"}</button>
       {error ? <p role="alert">{error}</p> : null}
       {availability !== null ? <>
         <ul>{availability.blockingReasons.map((reason, index) => <li key={`${reason.code}-${index}`}>{reason.message}</li>)}</ul>
@@ -175,7 +179,8 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
           <fieldset disabled={busy}>
             <legend>Preview selection</legend>
             <label>Identified title
-              <select value={titleId} onChange={(event) => { setTitleId(event.target.value); setSelected([]); }}>
+              <select value={titleId} required onChange={(event) => { setTitleId(event.target.value); setSelected([]); }}>
+                <option value="" disabled>Choose a current identified title</option>
                 {availability.titles.map((item) => <option key={item.observationId} value={item.observationId}>DVD title {item.displayTitleNumber}, angle {item.angleNumber}, chapters {item.chapterStart} to {item.chapterEnd}</option>)}
               </select>
             </label>
@@ -225,7 +230,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         <ul>{review.blockingReasons.map((reason, index) => <li key={`${reason.code}-${index}`}>{reason.code}: {reason.message}</li>)}</ul>
       </div> : null}
       <button type="button" disabled={busy || !review?.available} onClick={() => void requestPreview()}>{recreation ? "Request linked current-revision sample" : "Generate Damage Preview"}</button>
-      <label>Damage Preview request identity<input value={requestId} onChange={(event) => { setRequestId(event.target.value); setRecreation(null); setReview(null); }} /></label>
+      <label>Damage Preview request identity<input disabled={busy} value={requestId} onChange={(event) => { setRequestId(event.target.value); setRecreation(null); setReview(null); }} /></label>
       <button type="button" disabled={busy || !requestId} onClick={() => void inspectPreview("inspect")}>Refresh preview status</button>
       <button type="button" disabled={busy || !requestId} onClick={() => void inspectPreview("wait")}>Wait for preview</button>
       <button type="button" disabled={busy || !requestId || (preview !== null && !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(preview.generationStatus))} onClick={() => void inspectPreview("cancel")}>Cancel preview request</button>
@@ -237,7 +242,7 @@ export function DamagePreviewReview({ archiveId }: { archiveId: string }) {
         <details open><summary>Input differences</summary><pre>{JSON.stringify(recreation.differences, null, 2)}</pre></details>
         <button type="button" disabled={busy || !recreation.exact.available} onClick={() => void requestExactRecreation()}>Request exact recreation</button>
         <p>For a current-revision sample, review availability and choose current title, intervals, streams and settings in the form above. Review preview selections again, inspect these differences, then explicitly request the linked current-revision sample.</p>
-        <button type="button" onClick={() => { setRecreation(null); setReview(null); }}>Leave recreation review</button>
+        <button type="button" disabled={busy} onClick={() => { setRecreation(null); setReview(null); }}>Leave recreation review</button>
       </div> : null}
       {preview ? <div aria-label="Damage Preview request" role="status">
         <p>Request {preview.id}. Status: {preview.status}. Generation: {preview.generationStatus}.</p>

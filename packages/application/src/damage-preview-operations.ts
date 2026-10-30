@@ -111,7 +111,7 @@ async function admitDamagePreview(access: DataAccess, archiveId: string, raw: un
     }
     return { reviewJson: JSON.stringify(current), ...(recreation && original && recreationReview ? { recreation: {
       sourceRequestId: original.id, mode: recreation.mode, differences: recreationReview.differences,
-      originalToolVersions: original.toolVersions, originalStreamMapping: original.streamMapping, originalDeviations: original.deviations,
+      originalCommands: original.commands, originalToolVersions: original.toolVersions, originalStreamMapping: original.streamMapping, originalDeviations: original.deviations,
     } } : {}) };
   }));
   const replay = access.damagePreviews.replay(admission);

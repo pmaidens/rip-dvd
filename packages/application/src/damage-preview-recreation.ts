@@ -35,7 +35,7 @@ export function reviewDamagePreviewRecreation(record: DamagePreviewRecord, curre
   if (["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status)) reasons.push({ code: "DAMAGE_PREVIEW_ORIGINAL_UNSETTLED", message: "Wait for or cancel the original generation before reviewing recreation." });
   if (differences.length > 0) reasons.push({ code: "DAMAGE_PREVIEW_RECREATION_INPUTS_CHANGED", message: "Review the differences, run a fresh current-revision preflight and explicitly request current-revision work." });
   reasons.push(...current.blockingReasons);
-  const recreationToken = `damage-preview-recreation:v1:${createHash("sha256").update(canonicalPublicationJson({ sourceRequestId: record.id, originalReview: original, originalStatus: record.status, originalToolVersions: record.toolVersions, originalStreamMapping: record.streamMapping, originalDeviations: record.deviations, current, differences, reasons })).digest("hex")}`;
+  const recreationToken = `damage-preview-recreation:v1:${createHash("sha256").update(canonicalPublicationJson({ sourceRequestId: record.id, originalReview: original, originalStatus: record.status, originalToolVersions: record.toolVersions, originalStreamMapping: record.streamMapping, originalDeviations: record.deviations, originalCommands: record.commands, currentPreflightToken: current.preflightToken, currentAvailable: current.available, checkpointVerified: current.current.checkpointVerified, differences, reasons })).digest("hex")}`;
   return {
     schemaVersion: 1, sourceRequestId: record.id, recreationToken,
     exact: { available: reasons.length === 0, reasons }, differences,
@@ -43,6 +43,11 @@ export function reviewDamagePreviewRecreation(record: DamagePreviewRecord, curre
     original: { generationStatus: record.status, reason: record.reason, toolVersions: record.toolVersions, streamMapping: record.streamMapping, deviations: record.deviations },
     warning: "Exact inputs do not promise byte-identical output or watchability. The new generation records its current tool versions and material generation differences.",
   };
+}
+
+function commandSemantics(commands: string[][]) {
+  return commands.map((command) => command.map((argument, index) =>
+    index > 0 && ["-o", "--output"].includes(command[index - 1]!) ? "<preview-output>" : argument.startsWith("--output=") ? "--output=<preview-output>" : argument));
 }
 
 export function presentDamagePreviewRecreation(record: DamagePreviewRecord) {
@@ -55,6 +60,7 @@ export function presentDamagePreviewRecreation(record: DamagePreviewRecord) {
   const active = ["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status);
   const toolsRecorded = Object.keys(record.toolVersions).length > 0;
   if (toolsRecorded && !active) {
+    compare("resolvedCommands", commandSemantics(recreation.originalCommands), commandSemantics(record.commands));
     compare("toolVersions", recreation.originalToolVersions, record.toolVersions);
     compare("streamMapping", recreation.originalStreamMapping, record.streamMapping);
     compare("sampleDeviations", recreation.originalDeviations, record.deviations);

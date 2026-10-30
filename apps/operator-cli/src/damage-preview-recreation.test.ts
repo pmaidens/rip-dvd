@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DamagePreviewRecreationReview } from "@rip-dvd/application";
@@ -97,4 +98,19 @@ it("discovers recreation and accepts structured review and mutation inputs throu
   const input = { mode: "exact", recreationToken: reviewed.recreationToken, preflightToken: reviewed.preflight.preflightToken };
   const path = join(fixture.operatorHostPath, "synthetic-recreation.json"); writeFileSync(path, JSON.stringify(input));
   expect(await fixture.run(["damage-preview", "recreate", id, "--key", "synthetic-file-recreation", "--file", path])).toMatchObject({ exitCode: 0, result: { recreation: { sourceRequestId: id } } });
+});
+
+it("keeps recreation currency across ordinary active Recovery transitions in the same attempt", async () => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { id, seeded } = await seedRetainedDamagePreview(fixture);
+  const database = new DatabaseSync(fixture.databasePath);
+  try {
+    database.prepare("UPDATE archive_recoveries SET status = 'eligible', stop_operation_id = NULL, stop_requested_at = NULL, stopped_at = NULL WHERE original_disc_archive_id = ?").run(seeded.archive.id);
+    const reviewed = (await fixture.run(["damage-preview", "recreate", id])).result as DamagePreviewRecreationReview;
+    expect(reviewed.exact.available).toBe(true);
+    database.prepare("UPDATE archive_recoveries SET status = 'waiting_for_disc' WHERE original_disc_archive_id = ?").run(seeded.archive.id);
+    const changed = (await fixture.run(["damage-preview", "recreate", id])).result as DamagePreviewRecreationReview;
+    expect(changed.recreationToken).toBe(reviewed.recreationToken);
+    expect(await fixture.run(["damage-preview", "recreate", id, "--key", "synthetic-active-transition", "--json", JSON.stringify({ mode: "exact", recreationToken: reviewed.recreationToken, preflightToken: reviewed.preflight.preflightToken })])).toMatchObject({ exitCode: 0, result: { generationStatus: "waiting_for_checkpoint_or_ownership", recreation: { mode: "exact", sourceRequestId: id } } });
+  } finally { database.close(); }
 });

@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { createArchiveImageOwnership } from "@rip-dvd/worker-runtime";
-import type { DamagePreviewRecreationReview } from "@rip-dvd/application";
+import type { DamagePreviewRecreationReview, DamagePreviewInspection } from "@rip-dvd/application";
 import { createOperatorWorkflowFixture } from "../../../../../../operator-cli/src/operator-workflow.test-support.js";
 import { seedRetainedDamagePreview, settleDamagePreviewMedia } from "../../../../../../operator-cli/src/damage-preview.test-support.js";
 import { pollDamagePreviews } from "../../../../../../encode-worker/src/damage-preview-worker.js";
@@ -32,5 +32,28 @@ it("records current generation tools and material differences without rewriting 
     const result = (await fixture.run(["damage-preview", "inspect", (submitted.result as { id: string }).id])).result;
     expect(result).toMatchObject({ generationStatus: "complete", provenance: { toolVersions: { handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" } }, recreation: { sourceRequestId: id, mode: "exact", generationComparison: "recorded", generationDifferences: expect.arrayContaining([{ field: "toolVersions", before: { handbrake: "synthetic-older-handbrake" }, after: { handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" } }]) } });
     expect(await inspect()).toEqual(removed);
+  } finally { access.close(); }
+});
+
+it.each([false, true])("reports changed resolved generation flags with identical tools, ignoring new output paths, changed: %s", async (changed) => {
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const { id, seeded } = await seedRetainedDamagePreview(fixture);
+  const access = fixture.openAccess();
+  try {
+    const original = access.damagePreviews.find(id)!;
+    original.toolVersions = { handbrake: "synthetic-handbrake-v1", ffprobe: "synthetic-probe-v1" };
+    original.streamMapping = { policyVersion: "dvd-preview-stream-map-v1", audio: [{ sourceId: 128, physicalId: 128, trackNumber: 1, codec: "ac3", channels: 2 }], subtitles: [] };
+    original.deviations = ["The sample uses explicit title-time boundaries instead of the complete playback selection."];
+    original.commands = [[0, 45], [66, 339]].map(([start, duration], index) => ["rip-dvd-handbrake", "--no-dvdnav", "--title", "1", "--angle", "1", "-i", seeded.archive.archivePath, "-o", `${fixture.mediaLibraryPath}/.damage-previews/${id}/${index}.partial.mkv`, "--format", "av_mkv", "--preset", "Fast 1080p30", "--audio", "1", "--subtitle", "none", "--subtitle-burned=none", "--start-at", `seconds:${start}`, "--stop-at", `seconds:${duration}`, ...(changed ? ["--decomb"] : [])]);
+    access.damagePreviews.update(original);
+    const review = (await fixture.run(["damage-preview", "recreate", id])).result as DamagePreviewRecreationReview;
+    const requested = await fixture.run(["damage-preview", "recreate", id, "--key", "synthetic-command-difference", "--json", JSON.stringify({ mode: "exact", recreationToken: review.recreationToken, preflightToken: review.preflight.preflightToken })]);
+    expect(requested.exitCode).toBe(0);
+    await pollDamagePreviews({ access, mediaLibraryPath: fixture.mediaLibraryPath, originalsLibraryPath: fixture.originalsLibraryPath, signal: new AbortController().signal, generator: media(), ownership: createArchiveImageOwnership({ authorityRootPath: fixture.originalsLibraryPath }) });
+    const inspected = (await fixture.run(["damage-preview", "inspect", (requested.result as { id: string }).id])).result as DamagePreviewInspection;
+    expect(inspected.generationStatus).toBe("complete");
+    const differences = inspected.recreation!.generationDifferences;
+    if (changed) expect(differences).toEqual([{ field: "resolvedCommands", before: expect.arrayContaining([expect.arrayContaining(["--decomb"])]), after: expect.any(Array) }]);
+    else expect(differences).toEqual([]);
   } finally { access.close(); }
 });

@@ -998,3 +998,48 @@ test("Damage Preview media deletion keeps provenance and coverage visible", asyn
   await preview.getByText("Preview provenance").click();
   await expect(preview.locator("pre")).toContainText('"manifestRevision": 1');
 });
+
+test("historical recreation refreshes already loaded current title and profile choices", async ({ page }, testInfo) => {
+  const requestId = "11111111-2222-4333-8444-777777777777";
+  let currentChoices: import("@rip-dvd/application").DamagePreviewAvailability | undefined;
+  let proposedPreflight: import("@rip-dvd/application").DamagePreviewAvailability | undefined;
+  let submittedCurrentSelection = false;
+  await page.route("**/api/damage-previews/*/availability", async (route) => {
+    const response = await fetchFromBrowserServer(route);
+    const body = await response.json();
+    if (route.request().method() === "GET") {
+      currentChoices = { ...body, current: { ...body.current, assessmentIdentity: "synthetic-current-assessment" },
+        titles: [{ ...body.titles[0], observationId: "synthetic-current-observation" }],
+        encodingProfiles: [{ ...body.encodingProfiles[0], id: "synthetic-current-profile", displayName: "Synthetic current profile", version: 2 }] };
+    } else {
+      expect(route.request().postDataJSON()).toMatchObject({ titleIdentityObservationId: "synthetic-current-observation", assessmentIdentity: "synthetic-current-assessment", encodingProfileId: "synthetic-current-profile" });
+      submittedCurrentSelection = true;
+      body.available = true; body.blockingReasons = []; proposedPreflight = body;
+    }
+    await route.fulfill({ response, json: body });
+  });
+  await page.route("**/api/damage-previews/*/recreate", async (route) => {
+    if (!currentChoices) throw new Error("Load initial preview choices before recreation review.");
+    await route.fulfill({ json: { sourceRequestId: requestId, recreationToken: "synthetic-current-recreation", exact: { available: false, reasons: [{ code: "DAMAGE_PREVIEW_OLD_SOURCE_UNAVAILABLE", message: "The old source bytes are unavailable." }] }, differences: [{ field: "checkpoint", before: { manifestRevision: 1 }, after: { manifestRevision: 2 } }], preflight: route.request().method() === "POST" ? proposedPreflight : currentChoices, warning: "Exact inputs do not promise byte-identical output or watchability." } });
+  });
+  await openCatalogReview(page, `CATALOG_BROWSER_DAMAGE_${fixtureVariant(testInfo.project.name).toUpperCase()}`);
+  await page.getByRole("tab", { name: "Damage decision" }).click();
+  const preview = page.getByRole("region", { name: "Damage Preview", exact: true });
+  await preview.getByRole("button", { name: "Review preview availability" }).click();
+  await preview.getByLabel("Damage Preview request identity").fill(requestId);
+  await preview.getByRole("button", { name: "Review recreation", exact: true }).click();
+  await expect(preview.getByLabel("Identified title")).toHaveValue("");
+  await preview.getByLabel("Identified title").selectOption("synthetic-current-observation");
+  await expect(preview.getByLabel("Intended Encoding Profile")).toHaveValue("synthetic-current-profile");
+  await expect(preview.getByLabel("Intended Encoding Profile")).toContainText("Synthetic current profile, version 2");
+  await preview.getByLabel("Interval 1:", { exact: false }).check();
+  await preview.getByLabel("Playback range end in seconds").fill("180");
+  await preview.getByRole("button", { name: "Review preview selections" }).click();
+  await expect.poll(() => submittedCurrentSelection).toBe(true);
+  await expect(preview.getByRole("button", { name: "Request linked current-revision sample" })).toBeEnabled();
+  await expect(preview.getByRole("button", { name: "Refresh preview availability" })).toBeVisible();
+  await preview.getByRole("button", { name: "Refresh preview availability" }).click();
+  await expect(preview.getByLabel("Damage Preview recreation", { exact: true })).toContainText(`Original request ${requestId}`);
+  await expect(preview.getByRole("button", { name: "Request linked current-revision sample" })).toBeDisabled();
+  await expectNoPageOverflow(page);
+});
