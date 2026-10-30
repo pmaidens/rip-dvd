@@ -4,6 +4,11 @@ import { MutationKeyConflictError } from "../errors.js";
 import type { BrowserRenditionAccess, BrowserRenditionRecord, BrowserRenditionRequest } from "../browser-rendition.js";
 
 const operation = "encode-output-request-rendition";
+function semanticInput(input: BrowserRenditionRequest) {
+  // Leave the original no-subtitle shape intact for durable replay.
+  return JSON.stringify({ sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken,
+    ...(input.burnSubtitleIndex === undefined ? {} : { burnSubtitleIndex: input.burnSubtitleIndex }) });
+}
 export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Date): BrowserRenditionAccess {
   function transaction<T>(task: () => T): T {
     sqlite.exec("BEGIN IMMEDIATE");
@@ -16,7 +21,7 @@ export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Da
   function replay(input: BrowserRenditionRequest) {
     const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
     if (!previous) return null;
-    if (previous.operation !== operation || previous.semantic_input !== JSON.stringify({ sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken })) throw new MutationKeyConflictError();
+    if (previous.operation !== operation || previous.semantic_input !== semanticInput(input)) throw new MutationKeyConflictError();
     return JSON.parse(String(previous.outcome)) as BrowserRenditionRecord;
   }
   function update(record: BrowserRenditionRecord) {
@@ -46,7 +51,7 @@ export function createBrowserRenditionAccess(sqlite: DatabaseSync, now: () => Da
         sqlite.prepare("INSERT INTO browser_renditions (id, source_identity, status, record, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(record.id, record.sourceIdentity, record.status, JSON.stringify(record), timestamp.getTime());
         sqlite.prepare("INSERT INTO mutation_invocations (key, operation, semantic_input, outcome, created_at) VALUES (?, ?, ?, ?, ?)")
-          .run(input.mutationKey, operation, JSON.stringify({ sourceIdentity: input.sourceIdentity, reviewToken: input.reviewToken }), JSON.stringify(record), timestamp.getTime());
+          .run(input.mutationKey, operation, semanticInput(input), JSON.stringify(record), timestamp.getTime());
         return record;
       });
     },

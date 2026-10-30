@@ -24,7 +24,7 @@ it("serves exact authenticated ranges, suffixes, HEAD, If-Range and 416 failures
   const access = fixture.openAccess();
   try {
     await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true, generator: {
-      probe: compatibleOutputProbe, version: async () => "ffmpeg synthetic-media", remux: async ({ destination }) => { await writeFile(destination, bytes); },
+      probe: compatibleOutputProbe, version: async () => "ffmpeg synthetic-media", generate: async ({ destination }) => { await writeFile(destination, bytes); },
     } });
     const url = `http://localhost/api/browser-renditions/${seeded.request.id}/media`;
     const get = (Range?: string, method = "GET", extra = {}) => createBrowserRenditionMediaRoute(new Request(url, { method, headers: { Authorization, ...(Range ? { Range } : {}), ...extra } }), seeded.request.id, () => access, config);

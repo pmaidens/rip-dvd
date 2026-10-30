@@ -23,7 +23,7 @@ it("keeps failed-source and ordinary-playback warnings visible through authoriza
 it("resumes a saved durable rendition without requesting another one or acknowledging inspection", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   sessionStorage.setItem("encode-output-browser-rendition:synthetic-artifact", "synthetic-rendition");
-  const fetcher = vi.fn(async () => Response.json({ id: "synthetic-rendition", status: "complete", progress: { percent: 100 }, sourceAuthorityRevision: "earlier-authority", source: { identity: "synthetic-artifact", state: "validation_failed", file: { mutationRevision: "earlier-file" }, media: { streams: [{ kind: "audio", codecName: "aac", language: "eng" }] } }, conversion: { kind: "stream_copy_remux", subtitles: "omitted" }, reason: null, media: { identity: "synthetic-rendition-media" } }));
+  const fetcher = vi.fn(async () => Response.json({ id: "synthetic-rendition", status: "complete", progress: { percent: 100 }, sourceAuthorityRevision: "earlier-authority", source: { identity: "synthetic-artifact", state: "validation_failed", file: { mutationRevision: "earlier-file" }, media: { streams: [{ index: 1, kind: "audio", codecName: "aac", language: "eng" }] } }, conversion: { kind: "stream_copy_remux", subtitles: "omitted" }, reason: null, media: { identity: "synthetic-rendition-media" } }));
   vi.stubGlobal("fetch", fetcher);
   const container = document.createElement("div"); document.body.append(container);
   const root = createRoot(container);
@@ -32,7 +32,7 @@ it("resumes a saved durable rendition without requesting another one or acknowle
     expect(container.querySelector("video")?.getAttribute("src")).toBe("/api/browser-renditions/synthetic-rendition/media");
     expect(container.textContent).toContain("Validation-failed source"); expect(container.textContent).toContain("Soft subtitles omitted");
     expect(container.textContent).toContain("Historical rendition");
-    expect(container.textContent).toContain("Audio: aac eng");
+    expect(container.textContent).toContain("Audio: #1 aac, eng");
     expect(fetcher.mock.calls).toHaveLength(1);
     await act(async () => container.querySelector("video")!.dispatchEvent(new Event("error")));
     expect(container.textContent).toContain("The browser could not play this rendition");
@@ -75,5 +75,42 @@ it("keeps a newly admitted request selected when an older restoration response a
     expect(container.querySelector("video")?.getAttribute("src")).toBe("/api/browser-renditions/new-request/media");
     expect(container.textContent).toContain("Rendition new-request: complete");
     expect(container.textContent).not.toContain("Rendition earlier-request");
+  } finally { await act(async () => root.unmount()); }
+});
+
+it("reviews the chosen subtitle before submitting a separate burned rendition and labels actual converted audio", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const source = { identity: "synthetic-artifact", state: "validation_failed", file: { mutationRevision: "synthetic-file" }, media: { streams: [
+    { index: 0, kind: "video", codecName: "mpeg2video", language: null, title: null },
+    { index: 1, kind: "audio", codecName: "ac3", language: "eng", title: "Synthetic audio" },
+    { index: 2, kind: "subtitle", codecName: "dvd_subtitle", language: "eng", title: "Synthetic captions" },
+  ] } };
+  const conversion = (burned: boolean) => ({ kind: "h264_aac_transcode", subtitles: burned ? "burned_in" : "omitted", omittedStreamIndexes: burned ? [] : [2],
+    streams: [{ sourceIndex: 1, outputIndex: 1, kind: "audio", sourceCodec: "ac3", codec: "aac", mode: "transcode", language: "eng", title: "Synthetic audio", differences: ["Stereo downmix"] }],
+    burnedSubtitle: burned ? { sourceIndex: 2, codecName: "dvd_subtitle", language: "eng", title: "Synthetic captions" } : null });
+  let submitted: unknown;
+  vi.stubGlobal("fetch", async (url: string, options?: { method?: string; body?: string }) => {
+    if (options?.method === "POST") {
+      submitted = JSON.parse(options.body!);
+      return Response.json({ id: "synthetic-burned-request", status: "complete", progress: { percent: 100 }, source, sourceAuthorityRevision: "synthetic-authority", conversion: conversion(true),
+        actualMedia: { streams: [{ index: 1, kind: "audio", codecName: "aac", language: "eng", title: null }] }, reason: null, media: { identity: "synthetic-media" } });
+    }
+    const burned = url.endsWith("?burnSubtitleIndex=2");
+    return Response.json({ available: true, reasons: [], reviewToken: burned ? "selected-subtitle-token" : "plain-token", source, conversion: conversion(burned) });
+  });
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<EncodeOutputBrowserViewing artifactIdentity="synthetic-artifact" validationFailed sourceAuthorityRevision="synthetic-authority" sourceFileMutationRevision="synthetic-file" />));
+    const button = (label: string) => [...container.querySelectorAll("button")].find((element) => element.textContent === label)!;
+    await act(async () => button("Check browser playback").click());
+    expect(container.textContent).toContain("Soft subtitles omitted: #2 dvd_subtitle, eng, Synthetic captions");
+    await act(async () => { const select = container.querySelector("select")!; select.value = "2"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(container.textContent).toContain("Burned subtitle #2");
+    await act(async () => button("Create browser rendition").click());
+    expect(submitted).toMatchObject({ reviewToken: "selected-subtitle-token", burnSubtitleIndex: 2, mutationKey: expect.any(String) });
+    expect(container.textContent).toContain("Observed rendition audio: #1 aac, eng");
+    expect(container.textContent).toContain("ac3 to aac, converted. Stereo downmix");
+    expect(container.textContent).toContain("Validation-failed source");
   } finally { await act(async () => root.unmount()); }
 });

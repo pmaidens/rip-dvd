@@ -74,3 +74,53 @@ it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true")("a surviving remu
     for (let attempt = 0; attempt < 160 && inspectKernelProcessLock(lockPath) === "held"; attempt++) await delay(25);
   }
 });
+
+it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true").each([
+  ["incompatible", undefined], ["audio_conversion", undefined], ["video_format", undefined],
+  ["subtitles", undefined], ["subtitles", 2], ["subtitles", 3],
+] as const)("converts real %s media with burned stream %s, preserves canonical bytes and verifies subtitle pixels", async (variant, burnSubtitleIndex) => {
+  const { createSyntheticViewingSource } = await import("./browser-rendition-media.test-support.js");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const source = createSyntheticViewingSource(fixture.operatorHostPath, variant);
+  const canonicalBytes = await readFile(source);
+  const seeded = await requestSyntheticRendition(fixture, true, { probe: probeEncodeOutputMedia, canonicalBytes, burnSubtitleIndex });
+  const access = fixture.openAccess();
+  try {
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true });
+    const inspected = await fixture.run(["encode-output", "inspect-rendition", seeded.request.id]);
+    expect(inspected).toMatchObject({ exitCode: 0, result: { status: "complete", source: { state: "validation_failed", encodeJob: { status: "failed" } }, conversion: { kind: "h264_aac_transcode", subtitles: burnSubtitleIndex === undefined ? variant === "subtitles" ? "omitted" : "none" : "burned_in" } } });
+    const record = access.browserRenditions.find(seeded.request.id)!;
+    const mediaPath = record.media!.path;
+    const output = await probeEncodeOutputMedia(mediaPath);
+    expect(output.streams.map((stream) => stream.codecName)).toEqual(["h264", "aac"]);
+    execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-ss", "1.5", "-i", mediaPath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"], { stdio: "pipe" });
+    const audio = execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-i", mediaPath, "-map", "0:a:0", "-f", "s16le", "-"], { maxBuffer: 2_000_000 });
+    expect(audio.some((byte) => byte !== 0)).toBe(true);
+    const frame = (at: string) => execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-ss", at, "-i", mediaPath, "-map", "0:v:0", "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"]);
+    // Black video makes a burned caption an independently observable claim.
+    const visible = frame("1.5"), before = frame("0.1"), after = frame("2.8");
+    expect(Math.max(...before)).toBeLessThan(30); expect(Math.max(...after)).toBeLessThan(30);
+    if (burnSubtitleIndex === undefined) expect(Math.max(...visible)).toBeLessThan(30);
+    if (burnSubtitleIndex !== undefined) expect(Math.max(...visible)).toBeGreaterThan(180);
+    const exported = await fixture.run(["encode-output", "export", seeded.identity, "--destination", join(fixture.operatorHostPath, "canonical-copy.mkv")]);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(fixture.operatorHostPath, "canonical-copy.mkv"))).toEqual(canonicalBytes);
+  } finally { access.close(); }
+});
+
+it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true")("records an actual failed conversion process without publishing media", async () => {
+  const { createSyntheticViewingSource } = await import("./browser-rendition-media.test-support.js");
+  const { createBrowserRenditionGenerator, runRenditionCommand } = await import("../src/browser-rendition-generator.js");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const source = createSyntheticViewingSource(fixture.operatorHostPath, "incompatible");
+  const seeded = await requestSyntheticRendition(fixture, true, { probe: probeEncodeOutputMedia, canonicalBytes: await readFile(source) });
+  const access = fixture.openAccess();
+  try {
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true,
+      generator: { ...createBrowserRenditionGenerator(), async generate(input) {
+        await runRenditionCommand("ffmpeg", ["-nostdin", "-v", "error", "-i", input.source, "-c:v", "synthetic-missing-encoder", input.destination], input.signal, input.executionDescriptor);
+      } } });
+    expect((await fixture.run(["encode-output", "inspect-rendition", seeded.request.id])).result).toMatchObject({ status: "failed", media: null, reason: { code: "RENDITION_CONVERSION_FAILED" } });
+    await expect(openBrowserRendition(access, seeded.request.id, true)).rejects.toMatchObject({ code: "RENDITION_MEDIA_UNAVAILABLE" });
+  } finally { access.close(); }
+});
