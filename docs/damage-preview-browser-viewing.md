@@ -76,7 +76,8 @@ These contracts are also relevant to work on Encode Output playback:
   absence, and preserves request/conversion history. Eligibility uses the exact
   artifact's durable removal outcome even when deleting a sibling clip failed;
   `previewCondition.canonicalMediaRemoved` reports this separately from the
-  aggregate canonical deletion status. A source
+  aggregate canonical deletion status. A cleanup failure keeps the media reference
+  and a failure reason for retry while unrelated queued renditions continue. A source
   becoming outdated alone does not remove or relabel its immutable provenance.
 
 Canonical exports and the existing Damage Preview generation, recreation and

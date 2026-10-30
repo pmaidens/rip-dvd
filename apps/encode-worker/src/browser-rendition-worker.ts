@@ -37,11 +37,17 @@ export async function pollBrowserRenditions(options: Options) {
     for (const retained of options.access.browserRenditions.retainedPreviewMedia()) {
       const condition = inspectDamagePreviewRenditionCondition(options.access, retained.sourceIdentity);
       if (condition.canonicalMediaRemoved) {
-        await rm(join(root, retained.id), { recursive: true, force: true });
-        // Commit durable absence before SQLite stops tracking these owned bytes.
-        // If synchronization fails, leave the media record available for retry.
-        const rootDirectory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY);
-        try { await rootDirectory.sync(); } finally { await rootDirectory.close(); }
+        try {
+          await rm(join(root, retained.id), { recursive: true, force: true });
+          // Commit durable absence before SQLite stops tracking these owned bytes.
+          // If synchronization fails, leave the media record available for retry.
+          const rootDirectory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY);
+          try { await rootDirectory.sync(); } finally { await rootDirectory.close(); }
+        } catch {
+          retained.reason = { code: "RENDITION_MEDIA_CLEANUP_FAILED", message: "This rendition's media could not be removed. Cleanup will retry." };
+          options.access.browserRenditions.update(retained);
+          continue;
+        }
         retained.media = null;
         retained.reason = { code: "DAMAGE_PREVIEW_MEDIA_UNAVAILABLE", message: "Canonical sample media was removed or is missing. Derived media was removed; request history remains." };
         options.access.browserRenditions.update(retained);

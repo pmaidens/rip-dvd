@@ -98,3 +98,42 @@ it("removes a derivative for its durably deleted clip even when deleting another
     } });
   } finally { access.close(); }
 });
+
+it("reports an orphan cleanup failure without blocking an unrelated queued rendition and retries the retained reference", async () => {
+  const { chmodSync, copyFileSync, unlinkSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticPreviewRendition(fixture);
+  const access = fixture.openAccess();
+  let oldDirectory: string | undefined;
+  try {
+    const record = access.damagePreviews.find(seeded.id)!;
+    const otherPath = join(dirname(seeded.path), "1.mkv");
+    copyFileSync(seeded.path, otherPath);
+    const otherIdentity = `damage-preview-v1.${seeded.id}.1`;
+    record.artifacts.push({ ...record.artifacts[0]!, identity: otherIdentity, path: otherPath });
+    access.damagePreviews.update(record);
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    const derivative = access.browserRenditions.find(seeded.request.id)!.media!.path;
+    oldDirectory = dirname(derivative);
+    const review = (await fixture.run(["damage-preview", "rendition-availability", otherIdentity], undefined, undefined, seeded.cliOptions)).result as { reviewToken: string };
+    const requested = await fixture.run(["damage-preview", "request-rendition", otherIdentity, "--key", "synthetic-independent-rendition", "--json", JSON.stringify({ reviewToken: review.reviewToken })], undefined, undefined, seeded.cliOptions);
+    expect(requested.exitCode).toBe(0);
+    const nextId = (requested.result as { id: string }).id;
+    unlinkSync(seeded.path);
+    chmodSync(oldDirectory, 0o500);
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    expect(await fixture.run(["damage-preview", "inspect-rendition", seeded.request.id])).toMatchObject({ exitCode: 0, result: {
+      reason: { code: "RENDITION_MEDIA_CLEANUP_FAILED" }, media: { availability: { available: false } },
+    } });
+    expect(await fixture.run(["damage-preview", "inspect-rendition", nextId])).toMatchObject({ exitCode: 0, result: { status: "complete", media: { availability: { available: true } } } });
+    expect(existsSync(derivative)).toBe(true);
+    chmodSync(oldDirectory, 0o700);
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    expect(existsSync(derivative)).toBe(false);
+    expect(await fixture.run(["damage-preview", "inspect-rendition", seeded.request.id])).toMatchObject({ exitCode: 0, result: { media: null } });
+  } finally {
+    if (oldDirectory && existsSync(oldDirectory)) chmodSync(oldDirectory, 0o700);
+    access.close();
+  }
+});
