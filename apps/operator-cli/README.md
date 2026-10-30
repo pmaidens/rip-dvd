@@ -817,7 +817,8 @@ Notification administration is available through `rip-dvd notifications`. See
 `rip-dvd damage-preview availability <archive-id>` discovers current saved
 checkpoint, Title Identity and assessment identities, qualified intervals,
 Encoding Profile versions and blocking reasons. It works before catalog mapping.
-Generation remains unavailable and new-format archive admission remains closed.
+Generation requires a separate reviewed request. New-format archive admission
+remains closed.
 Inspection never enqueues work, accepts damage or retains an ownership reservation.
 
 Supply a selection with exactly one of `--json`, `--stdin`, or `--file` to review
@@ -853,10 +854,11 @@ response retains the full uncertain span alongside the planned sample.
 
 With unknown timing, choose `mode: "ordinary_playback"` and an empty
 `intervalIndexes` list. This offers an identifiable-title selection without
-inventing a damage seek. Playback generation remains gated. Duration estimates
+inventing a damage seek. Generation requires an available preflight and an
+explicit request. Duration estimates
 describe planned clip coverage. Storage remains unknown because the intended
 preset settings do not provide a reliable byte rate; stream reproducibility
-also requires verification before generation is enabled. Every inspection
+is rechecked during generation. Every inspection
 returns all blocking reasons, and unavailable inspection succeeds with JSON
 `available: false`. Malformed input returns exit 2.
 
@@ -894,3 +896,21 @@ media removal with `media.removal.requestId`. The writable Encode worker removes
 only the admitted preview media. Use `damage-preview inspect <request-id>` for
 completion or failure. Replaying a mutation key returns its original acceptance;
 it does not report later worker completion or perform an unlink in the CLI.
+
+## Damage Preview recreation
+
+`damage-preview recreate <request-id>` reviews retained evidence after media
+cleanup. With no mutation key it is read-only. Optional structured input
+`{"selection":{...}}` compares a deliberate current selection using the same
+selection schema as availability. The response includes exact availability,
+field-level differences, a recreation token and fresh preflight.
+
+To request a new linked exact recreation, pass `--key` and
+`{"mode":"exact","recreationToken":"<token>","preflightToken":"<token>"}`.
+For changed inputs, review a complete current selection first, then submit it
+with `mode: "current_revision"`, `selection`, both tokens and a new key.
+`--json`, `--stdin` and `--file` work for both operations. Exact recreation
+requires provable old bytes and Title Identity. New tools can produce different
+bytes; neither exact inputs nor successful generation prove watchability.
+See [recreation rules and examples](../../docs/damage-preview-recreation.md)
+for unavailable reasons, replay, HTTP parity and validation gates.

@@ -78,5 +78,11 @@ chosen path, including with a remote daemon. Staging beside the destination
 also supports a caller destination on another filesystem; no caller bind mount or server-local
 path substitutes for that transfer. JSON stdout contains metadata only. The web
 offers canonical downloads through the deployment's operator authentication
-boundary. Browser Viewing Renditions, retention cleanup and recreation remain separate
-capabilities.
+boundary. Recreation uses a fresh preflight and creates a new linked request through the
+same admission and generation path. Exact recreation requires the retained
+input evidence and the same currently proved durable source checkpoint;
+checkpoint history alone cannot recreate older image bytes. Changed inputs
+require reviewed differences and an explicit current-revision request. Current
+generation tools and material differences remain separate from original
+provenance. See `docs/damage-preview-recreation.md` for the operator contract.
+Browser Viewing Renditions remain a separate capability.

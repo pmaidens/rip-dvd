@@ -3,7 +3,7 @@ import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encod
 import { inspectEncodeOutputIntervals } from "./encode-output-correspondence.js";
 import { previewEncodeOutputKeep } from "./encode-output-keep-preflight.js";
 import { keepFailedEncodeOutput } from "./encode-output-keep.js";
-import { requestDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
+import { requestDamagePreview, inspectDamagePreviewRecreation, recreateDamagePreview, inspectDamagePreview, cancelDamagePreview, waitDamagePreview, exportDamagePreview } from "./damage-preview-operations.js";
 import { removeDamagePreviewMedia } from "./damage-preview-media-removal.js";
 import { inspectArchiveEvidence } from "./archive-evidence.js";
 import { inspectDamagePreviewAvailability } from "./damage-preview.js";
@@ -454,6 +454,8 @@ export function createApplicationOperations(
       archiveId: string,
       options?: { limit?: number; cursor?: string },
     ) => inspectCatalogTitleDamage(access, archiveId, options),
+    inspectDamagePreviewRecreation: (id: string, selection?: unknown) => inspectDamagePreviewRecreation(access, id, selection, dependencies.archiveImageOwnership),
+    recreateDamagePreview: (id: string, input: unknown) => recreateDamagePreview(access, id, input, dependencies.archiveImageOwnership),
     requestDamagePreview: (archiveId: string, input: unknown) => requestDamagePreview(access, archiveId, input, dependencies.archiveImageOwnership),
     inspectDamagePreview: (id: string) => inspectDamagePreview(access, id, dependencies.archiveImageOwnership),
     waitDamagePreview: (id: string, options: { timeoutMs: number; pollMs?: number }) => waitDamagePreview(access, id, options, dependencies.archiveImageOwnership),
@@ -1169,3 +1171,4 @@ export { keepFailedEncodeOutput, EncodeOutputKeepRejectedError, InvalidEncodeOut
 export type { EncodeOutputKeepResult } from "./encode-output-keep.js";
 
 export * from "./encode-output-rendition.js";
+export type DamagePreviewRecreationReview = Awaited<ReturnType<typeof inspectDamagePreviewRecreation>>;

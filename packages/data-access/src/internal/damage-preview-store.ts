@@ -4,7 +4,7 @@ import { damagePreviews } from "./schema.js";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { MutationKeyConflictError, RecordNotFoundError } from "../errors.js";
-import type { DamagePreviewAccess, DamagePreviewRecord } from "../damage-preview.js";
+import type { DamagePreviewAccess, DamagePreviewRecord, DamagePreviewAdmission } from "../damage-preview.js";
 
 // Shared by the recovery admission transaction and the preview store.
 export const damagePreviewHoldsRecovery = sql`${damagePreviews.status} IN ('queued', 'waiting_for_checkpoint_or_ownership', 'generating') AND coalesce(json_extract(${damagePreviews.record}, '$.sourceReleased'), 0) = 0`;
@@ -70,6 +70,8 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     });
   }
 
+  const operation = (input: DamagePreviewAdmission) => input.recreation ? "damage-preview-recreate" : "damage-preview-request";
+  const semantic = (input: DamagePreviewAdmission) => ({ archiveId: input.archiveId, preflightToken: input.preflightToken, selectionJson: input.selectionJson, ...(input.recreation ? { recreation: input.recreation } : {}) });
   return {
     find,
     pendingForRecovery(archiveId) {
@@ -81,7 +83,7 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
     replay(input) {
       const previous = sqlite.prepare("SELECT operation, semantic_input, outcome FROM mutation_invocations WHERE key = ?").get(input.mutationKey);
       if (!previous) return null;
-      if (previous.operation !== "damage-preview-request" || previous.semantic_input !== JSON.stringify({ archiveId: input.archiveId, preflightToken: input.preflightToken, selectionJson: input.selectionJson })) throw new MutationKeyConflictError();
+      if (previous.operation !== operation(input) || previous.semantic_input !== JSON.stringify(semantic(input))) throw new MutationKeyConflictError();
       return JSON.parse(String(previous.outcome)) as DamagePreviewRecord;
     },
     list(archiveId) {
@@ -91,12 +93,13 @@ export function createDamagePreviewAccess(sqlite: DatabaseSync, now: () => Date)
       return rows.map((row) => JSON.parse(String(row.record)) as DamagePreviewRecord);
     },
     submit(input, prepare) {
-      return mutate(input.mutationKey, "damage-preview-request", { archiveId: input.archiveId, preflightToken: input.preflightToken, selectionJson: input.selectionJson }, () => {
-        const reviewJson = prepare();
+      return mutate(input.mutationKey, operation(input), semantic(input), () => {
+        const { reviewJson, recreation } = prepare();
         const review = JSON.parse(reviewJson) as { clips: unknown[]; current: { checkpointVerified: boolean } };
         const timestamp = now();
         const record: DamagePreviewRecord = {
           id: randomUUID(), originalDiscArchiveId: input.archiveId, status: review.current.checkpointVerified ? "queued" : "waiting_for_checkpoint_or_ownership", preflightToken: input.preflightToken,
+          ...(recreation ? { recreation } : {}),
           selectionJson: input.selectionJson, reviewJson, workerId: null, cancellationRequested: false,
           reason: review.current.checkpointVerified ? null : { code: "DAMAGE_PREVIEW_WAITING_FOR_CHECKPOINT", message: "The request is waiting for Recovery to settle and for verification of its reviewed checkpoint under image ownership." },
           progress: { completedClips: 0, totalClips: review.clips.length, percent: null },

@@ -3,12 +3,13 @@ import { constants } from "node:fs";
 import { open, link, unlink } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { canonicalPublicationJson, DvdCheckpointReadFault, RecordNotFoundError, type DataAccess, type DamagePreviewRecord, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
+import { canonicalPublicationJson, DvdCheckpointReadFault, RecordNotFoundError, type DataAccess, type DamagePreviewRecord, type DamagePreviewAdmission, type OriginalDiscArchiveId } from "@rip-dvd/data-access";
 import { ArchiveImageOwnershipError, defaultArchiveImageOwnership, type ArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 import { parseMutationKey } from "./mutation-key.js";
 import { InvalidDamagePreviewInputError, parseDamagePreviewInput } from "./damage-preview-input.js";
 import { inspectDamagePreviewAvailability, reviewDamagePreviewEvidence } from "./damage-preview.js";
 import { damagePreviewMediaState, damagePreviewRetention, presentDamagePreviewMedia, type previewMediaTargets } from "./damage-preview-media-state.js";
+import { reviewDamagePreviewRecreation, presentDamagePreviewRecreation } from "./damage-preview-recreation.js";
 import { inspectDamagePreviewOutputAcknowledgements, type DamagePreviewFinishedOutputInspection } from "./damage-preview-output-inspection.js";
 
 type Review = Awaited<ReturnType<typeof inspectDamagePreviewAvailability>>;
@@ -48,6 +49,7 @@ export function presentDamagePreview(record: DamagePreviewRecord, context: {
       state: record.sourceReleased || !["queued", "waiting_for_checkpoint_or_ownership", "generating"].includes(record.status) ? "released" : record.status === "generating" ? "paused" : "waiting",
       reason: { code: "DAMAGE_PREVIEW_PLANNED_RECOVERY_PAUSE", message: "Recovery finishes its admitted command and durable checkpoint, then pauses for this preview. This planned pause does not start the contention grace period." },
     } : null,
+    recreation: presentDamagePreviewRecreation(record),
     reason: record.reason, cancellationRequested: record.cancellationRequested, progress: record.progress,
     artifacts: record.artifacts.map(({ path: _path, ...artifact }, index) => ({ ...artifact, media: files[index]!.media })),
     media,
@@ -58,12 +60,35 @@ export function presentDamagePreview(record: DamagePreviewRecord, context: {
   };
 }
 export async function requestDamagePreview(access: DataAccess, archiveId: string, raw: unknown, ownership: ArchiveImageOwnership = defaultArchiveImageOwnership) {
+  return admitDamagePreview(access, archiveId, raw, ownership);
+}
+
+export async function inspectDamagePreviewRecreation(access: DataAccess, id: string, raw?: unknown, ownership: ArchiveImageOwnership = defaultArchiveImageOwnership) {
+  const record = requiredRecord(access, id);
+  const selection = raw === undefined ? JSON.parse(record.selectionJson) : raw;
+  const current = await inspectDamagePreviewAvailability(access, record.originalDiscArchiveId, selection, ownership);
+  return reviewDamagePreviewRecreation(requiredRecord(access, id), current);
+}
+
+export async function recreateDamagePreview(access: DataAccess, id: string, raw: unknown, ownership: ArchiveImageOwnership = defaultArchiveImageOwnership) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.keys(raw).some((key) => !["mode", "selection", "preflightToken", "recreationToken", "mutationKey"].includes(key))) throw new InvalidDamagePreviewInputError("Invalid Damage Preview recreation request.");
+  const input = raw as Record<string, unknown>;
+  if (input.mode !== "exact" && input.mode !== "current_revision") throw new InvalidDamagePreviewInputError("Choose exact or current_revision recreation explicitly.");
+  if (typeof input.recreationToken !== "string" || !/^damage-preview-recreation:v1:[a-f0-9]{64}$/.test(input.recreationToken)) throw new InvalidDamagePreviewInputError("A reviewed recreation token is required.");
+  const original = requiredRecord(access, id);
+  if (input.mode === "exact" && input.selection !== undefined) throw new InvalidDamagePreviewInputError("Exact recreation uses the original selection.");
+  const selection = input.mode === "exact" ? JSON.parse(original.selectionJson) : input.selection;
+  return admitDamagePreview(access, original.originalDiscArchiveId, { selection, preflightToken: input.preflightToken, mutationKey: input.mutationKey }, ownership,
+    { sourceRequestId: id, mode: input.mode, recreationToken: input.recreationToken });
+}
+
+async function admitDamagePreview(access: DataAccess, archiveId: string, raw: unknown, ownership: ArchiveImageOwnership, recreation?: DamagePreviewAdmission["recreation"]) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.keys(raw).some((key) => !["selection", "preflightToken", "mutationKey"].includes(key))) throw new InvalidDamagePreviewInputError("Invalid Damage Preview request.");
   const input = raw as Record<string, unknown>;
   const mutationKey = parseMutationKey(input.mutationKey);
   if (typeof input.preflightToken !== "string" || input.preflightToken.length > 256) throw new InvalidDamagePreviewInputError("A reviewed preflight token is required.");
   const selection = parseDamagePreviewInput(input.selection);
-  const admission = { mutationKey, archiveId, preflightToken: input.preflightToken, selectionJson: canonicalPublicationJson(selection) };
+  const admission = { mutationKey, archiveId, preflightToken: input.preflightToken, selectionJson: canonicalPublicationJson(selection), ...(recreation ? { recreation } : {}) };
   // Stable requests validate the durable checkpoint under OS ownership.
   // Active requests retain the reviewed identity while deferring that proof.
   // Replay precedes preparation even after source changes.
@@ -74,13 +99,20 @@ export async function requestDamagePreview(access: DataAccess, archiveId: string
       id: header.currentManifestId, revision: header.currentManifestRevision, manifestDigest: header.currentManifestDigest, publicationDigest: activeToken[1]!,
     } : checkpoint;
     const current = reviewDamagePreviewEvidence(snapshot, archiveId, selection, reviewedCheckpoint);
+    const original = recreation ? requiredRecord(access, recreation.sourceRequestId) : null;
+    const recreationReview = original ? reviewDamagePreviewRecreation(original, current) : null;
+    if (recreationReview && recreationReview.recreationToken !== recreation!.recreationToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_RECREATION_STALE", [{ code: "DAMAGE_PREVIEW_RECREATION_STALE", message: "Review recreation against current identities and differences before requesting work." }], recreationReview);
+    if (recreation?.mode === "exact" && !recreationReview!.exact.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_EXACT_RECREATION_UNAVAILABLE", recreationReview!.exact.reasons, recreationReview);
     if (current.preflightToken !== input.preflightToken) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_STALE", [{ code: "DAMAGE_PREVIEW_STALE", message: "Review current preview inputs before requesting work." }], current);
     if (!current.available) throw new DamagePreviewRejectedError("DAMAGE_PREVIEW_UNAVAILABLE", current.blockingReasons, current);
     if (deferCheckpoint) {
       current.current.checkpointVerified = false;
       current.knownUnknowns.push({ code: "DAMAGE_PREVIEW_CHECKPOINT_PENDING", message: "Generation must verify the reviewed durable checkpoint under image ownership after Recovery pauses." });
     }
-    return JSON.stringify(current);
+    return { reviewJson: JSON.stringify(current), ...(recreation && original && recreationReview ? { recreation: {
+      sourceRequestId: original.id, mode: recreation.mode, differences: recreationReview.differences,
+      originalToolVersions: original.toolVersions, originalStreamMapping: original.streamMapping, originalDeviations: original.deviations,
+    } } : {}) };
   }));
   const replay = access.damagePreviews.replay(admission);
   if (replay) return presentDamagePreview(replay);

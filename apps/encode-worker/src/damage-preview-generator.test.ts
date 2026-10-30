@@ -47,13 +47,22 @@ it.skipIf(!available)("scans a synthetic DVD and generates a playable canonical 
     expect(title.audio).toEqual([{ sourceId: 128, physicalId: 128, trackNumber: 1, codec: "ac3", channels: 2 }]);
     expect(title.subtitles).toEqual([{ sourceId: 32, physicalId: 32, trackNumber: 1, style: "4By3" }]); expect(title.durationMilliseconds).toBeGreaterThan(3_500);
     const outputPath = join(root, "preview.mkv");
-    await generator.generate({ outputPath, sourceOwnershipDescriptor: handle.descriptor, signal: handle.signal, onOutput() {}, arguments_: ["--no-dvdnav", "--title", "1", "--angle", "1", "-i", source, "-o", outputPath, "--format", "av_mkv", "--preset", "Fast 1080p30", "--audio", String(title.audio[0]!.trackNumber), "--subtitle", String(title.subtitles[0]!.trackNumber), "--subtitle-burned=none", "--start-at", "seconds:1", "--stop-at", "seconds:2"] });
+    const intendedArguments = ["--no-dvdnav", "--title", "1", "--angle", "1", "-i", source, "--format", "av_mkv", "--preset", "Fast 1080p30", "--audio", String(title.audio[0]!.trackNumber), "--subtitle", String(title.subtitles[0]!.trackNumber), "--subtitle-burned=none", "--start-at", "seconds:1", "--stop-at", "seconds:2"];
+    await generator.generate({ outputPath, sourceOwnershipDescriptor: handle.descriptor, signal: handle.signal, onOutput() {}, arguments_: [...intendedArguments, "-o", outputPath] });
     await generator.whenInactive(outputPath); generator.requireInactive(outputPath);
     const inspected = await generator.inspect(outputPath);
     expect(inspected).toMatchObject({ videoCount: 1, audioCount: 1, subtitleCount: 1 });
     expect(inspected.durationMilliseconds).toBeGreaterThanOrEqual(1_900);
     expect(inspected.durationMilliseconds).toBeLessThanOrEqual(2_100);
     expect((await generator.versions()).handbrake).toMatch(/1\.9\.2/);
+    // Recreation uses the same source descriptor, selection and intended preset.
+    // Check current tools and actual media without assuming byte-identical output.
+    const recreatedPath = join(root, "recreated-preview.mkv");
+    const currentTools = await generator.versions();
+    await generator.generate({ outputPath: recreatedPath, sourceOwnershipDescriptor: handle.descriptor, signal: handle.signal, onOutput() {}, arguments_: [...intendedArguments, "-o", recreatedPath] });
+    await generator.whenInactive(recreatedPath); generator.requireInactive(recreatedPath);
+    expect(await generator.inspect(recreatedPath)).toMatchObject({ videoCount: 1, audioCount: 1, subtitleCount: 1 });
+    expect(currentTools.handbrake).toMatch(/1\.9\.2/);
   } });
 });
 

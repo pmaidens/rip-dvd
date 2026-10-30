@@ -31,6 +31,19 @@ export interface DamagePreviewMediaRemoval {
   expectedFiles: { identity: string; filesystemIdentity: string | null }[];
   outcomes: { identity: string; outcome: "removed" | "already_missing" | "failed" | "retained"; reasonCode: string | null }[];
 }
+export interface DamagePreviewRecreationDifference { field: string; before: unknown; after: unknown }
+export interface DamagePreviewRecreation {
+  sourceRequestId: string;
+  mode: "exact" | "current_revision";
+  differences: DamagePreviewRecreationDifference[];
+  originalToolVersions: Record<string, string>;
+  originalStreamMapping: DamagePreviewStreamMapping | null;
+  originalDeviations: string[];
+}
+export interface DamagePreviewAdmission {
+  mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string;
+  recreation?: { sourceRequestId: string; mode: "exact" | "current_revision"; recreationToken: string };
+}
 export interface DamagePreviewRecord {
   id: string;
   originalDiscArchiveId: string;
@@ -38,6 +51,7 @@ export interface DamagePreviewRecord {
   preflightToken: string;
   selectionJson: string;
   reviewJson: string;
+  recreation?: DamagePreviewRecreation;
   workerId: string | null;
   cancellationRequested: boolean;
   /** True only after all admitted source readers have closed. Old records hold until terminal. */
@@ -61,8 +75,8 @@ export interface DamagePreviewAccess {
   find(id: string): DamagePreviewRecord | null;
   pendingForRecovery(archiveId: string): DamagePreviewRecord | null;
   list(archiveId?: string): DamagePreviewRecord[];
-  replay(input: { mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string }): DamagePreviewRecord | null;
-  submit(input: { mutationKey: string; archiveId: string; preflightToken: string; selectionJson: string }, prepare: () => string): DamagePreviewRecord;
+  replay(input: DamagePreviewAdmission): DamagePreviewRecord | null;
+  submit(input: DamagePreviewAdmission, prepare: () => { reviewJson: string; recreation?: DamagePreviewRecreation }): DamagePreviewRecord;
   cancel(id: string, mutationKey: string): DamagePreviewRecord;
   cancel<T>(id: string, mutationKey: string, present: (record: DamagePreviewRecord) => T): T;
   claim(workerId: string): DamagePreviewRecord | null;

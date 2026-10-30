@@ -7,10 +7,11 @@ export async function runDamagePreview(args: readonly string[], io: StructuredIn
   const [action, id, ...tail] = args;
   const allowed: Record<string, string[]> = {
     availability: ["--json", "--stdin", "--file"], request: ["--json", "--stdin", "--file", "--key"],
+    recreate: ["--json", "--stdin", "--file", "--key"],
     inspect: [], wait: ["--timeout-ms", "--poll-ms"], cancel: ["--key"], export: ["--destination"],
     delete: ["--json", "--stdin", "--file", "--key"], cleanup: ["--json", "--stdin", "--file", "--key"],
   };
-  if (!action || !id || !Object.hasOwn(allowed, action)) throw new CommandFailure("INVALID_ARGUMENTS", "Expected damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup <identity> with the action's inputs.", 2);
+  if (!action || !id || !Object.hasOwn(allowed, action)) throw new CommandFailure("INVALID_ARGUMENTS", "Expected damage-preview availability|request|inspect|wait|cancel|export|delete|cleanup|recreate <identity> with the action's inputs.", 2);
   const options = new Map<string, string>();
   for (let index = 0; index < tail.length; index++) {
     const key = tail[index]!;
@@ -25,6 +26,11 @@ export async function runDamagePreview(args: readonly string[], io: StructuredIn
     const operations = createApplicationOperations(access);
     switch (action) {
       case "availability": return await operations.inspectDamagePreviewAvailability(id, input);
+      case "recreate": {
+        if (options.has("--key")) return await operations.recreateDamagePreview(id, { ...(input as Record<string, unknown> | undefined), mutationKey: options.get("--key") });
+        if (input !== undefined && (typeof input !== "object" || input === null || Array.isArray(input) || Object.keys(input).some((key) => key !== "selection"))) throw new InvalidDamagePreviewInputError("Recreation inspection accepts only a proposed selection. Submit reviewed work with --key.");
+        return await operations.inspectDamagePreviewRecreation(id, (input as { selection?: unknown } | undefined)?.selection);
+      }
       case "request": return await operations.requestDamagePreview(id, { ...(input as Record<string, unknown> | undefined), mutationKey: options.get("--key") });
       case "inspect": return await operations.inspectDamagePreview(id);
       case "wait": return await operations.waitDamagePreview(id, { timeoutMs: Number(options.get("--timeout-ms")), ...(options.has("--poll-ms") ? { pollMs: Number(options.get("--poll-ms")) } : {}) });
