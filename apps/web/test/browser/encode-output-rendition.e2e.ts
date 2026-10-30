@@ -166,6 +166,11 @@ test("reviews a selected subtitle and queues a separate burned rendition through
 
 // Authored correspondence responses isolate browser interaction from the
 // separately tested CLI/HTTP classification and real rendition clock producer.
+test.describe("authored output correspondence", () => {
+// Service-worker control can bypass page.route in WebKit after navigation.
+// Keep the authored responses deterministic; ordinary media tests above still
+// exercise the application's normal service-worker behavior.
+test.use({ serviceWorkers: "block" });
 for (const state of ["verified", "absent", "unknown", "changed_on_seek"] as const) {
   test(`only seeks a freshly proved output target, authored correspondence=${state}`, async ({ page }) => {
     let inspection: Record<string, any>;
@@ -228,3 +233,4 @@ for (const state of ["verified", "absent", "unknown", "changed_on_seek"] as cons
     expect(mutations).toEqual([]);
   });
 }
+});
