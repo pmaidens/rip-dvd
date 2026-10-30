@@ -12,6 +12,7 @@ const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
 const generator: BrowserRenditionGenerator = {
   probe: compatibleOutputProbe, version: async () => "ffmpeg synthetic-test-tool",
+  measureTimeline: async () => { throw new Error("An output timeline proof is not part of preview rendering."); },
   async generate({ destination, onProgress }) { onProgress(50); writeFileSync(destination, "synthetic MP4 bytes"); },
 };
 it.each(["complete", "partial", "interrupted", "failed"] as const)("renders retained %s sample bytes and keeps source provenance and live outdated conditions", async (generationStatus) => {
@@ -28,6 +29,7 @@ it.each(["complete", "partial", "interrupted", "failed"] as const)("renders reta
     const opened = await openBrowserRendition(access, seeded.request.id, true);
     try { expect(await opened.file.readFile("utf8")).toBe("synthetic MP4 bytes"); } finally { await opened.file.close(); }
     expect(access.browserRenditions.find(seeded.request.id)!.command).toContain("<canonical-preview-snapshot>");
+    expect(access.browserRenditions.find(seeded.request.id)!.timeline).toBeUndefined();
   } finally { access.close(); }
 });
 it.each(["conversion", "missing", "checksum", "interrupted"])("retains a distinct %s failure without media or an automatic restart", async (failure) => {
