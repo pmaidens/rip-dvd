@@ -18,9 +18,3 @@ export function ConversionDetails({ source, conversion, actualMedia }: Pick<Rend
     <p>{conversion.subtitles === "unknown" ? "Subtitle inventory is unknown." : `Soft subtitles omitted: ${source.media.streams?.filter((stream) => stream.kind === "subtitle" && conversion.omittedStreamIndexes?.includes(stream.index)).map(streamLabel).join("; ") || "none"}.`}</p>
   </>;
 }
-export async function readRenditionResponse(response: Response) {
-  if (response.status === 401) throw new Error("Sign in for browser playback, then try again.");
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error?.message ?? body.error?.code ?? "Browser playback is unavailable.");
-  return body;
-}

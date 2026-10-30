@@ -66,7 +66,9 @@ These contracts are also relevant to work on Encode Output playback:
   `X-Damage-Preview-Generation` and `X-Damage-Preview-Outdated`; they carry no
   Encode Output validation headers. The player keeps source conditions, revision,
   actual coverage and canonical relationship beside playback and refreshes them
-  while the player is mounted, including after playback errors.
+  while the player is mounted, including after playback errors. Both players use
+  `useBrowserRendition` for restoration, response fencing, polling and mutation
+  replay; each player selects its polling policy and keeps its own source labels.
 - Rendition range access refreshes the parent preview's media-use time. Pending
   canonical deletion immediately revokes new derived-media access. After canonical
   deletion or proven absence, the rendition worker removes its owned MP4 directory
