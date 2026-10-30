@@ -19,16 +19,22 @@ it.skipIf(process.env.RIP_DVD_TEST_RENDITION_MEDIA !== "true").each([false, true
   try {
     await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, enabled: true });
     const result = await fixture.run(["encode-output", "inspect-rendition", seeded.request.id]);
-    expect(result.result).toMatchObject({ status: "complete", conversion: { kind: "stream_copy_remux" }, source: { state: failed ? "validation_failed" : "published" } });
+    expect(result.result).toMatchObject({ status: "complete", conversion: { kind: "stream_copy_remux" }, source: { state: failed ? "validation_failed" : "published" },
+      timeline: { status: "verified", policyVersion: "browser-rendition-exact-video-v1", frames: expect.any(Array) } });
     const opened = await openBrowserRendition(access, seeded.request.id, true);
     try {
       const mp4 = await opened.file.readFile();
       expect(mp4.indexOf(Buffer.from("moov"))).toBeLessThan(mp4.indexOf(Buffer.from("mdat")));
     } finally { await opened.file.close(); }
     const mediaPath = access.browserRenditions.find(seeded.request.id)!.media!.path;
+    const clock = access.browserRenditions.find(seeded.request.id)!.timeline!;
+    if (clock.status !== "verified") throw new Error("Synthetic remux clock was not measured");
+    expect(clock.frames).toHaveLength(72);
+    const target = clock.frames[36]!.rendition.startMilliseconds / 1000;
     const inspection = await probeEncodeOutputMedia(mediaPath);
     expect(inspection.streams.map((stream) => stream.codecName)).toEqual(["h264", "aac"]);
     execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-ss", "1.5", "-i", mediaPath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"], { stdio: "ignore" });
+    execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-ss", String(target), "-i", mediaPath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"], { stdio: "ignore" });
     execFileSync("ffmpeg", ["-nostdin", "-v", "error", "-i", mediaPath, "-map", "0:a:0", "-f", "null", "-"], { stdio: "ignore" });
   } finally { access.close(); }
 });

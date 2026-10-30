@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   canonicalPublicationJson, encodeOutputFilesystemIdentity, sameEncodeOutputMutationSnapshot,
-  type EncodeClaimSnapshot, type EncodeOutputCellCorrespondence, type EncodeOutputVideoFingerprint,
+  type EncodeClaimSnapshot, type EncodeOutputCellCorrespondence, type EncodeOutputVideoFingerprint, type BrowserRenditionTimeline,
 } from "@rip-dvd/data-access";
 import type { ArchiveImageOwnershipHandle } from "@rip-dvd/worker-runtime";
 
@@ -286,5 +286,42 @@ export async function measureEncodeOutputCell(
   } catch {
     signal.throwIfAborted();
     return unknown("OUTPUT_MEASUREMENT_FAILED");
+  }
+}
+
+/** A separate canonical-to-rendition clock proof. This never creates source
+ * correspondence. Full decoded video must match, with native timing for every
+ * frame; equal durations or a conversion command alone cannot prove a seek.
+ */
+export async function measureBrowserRenditionTimeline(
+  canonicalPath: string, renditionPath: string, signal: AbortSignal,
+  tool: CorrespondenceMediaTool = runMediaTool,
+): Promise<BrowserRenditionTimeline> {
+  const policyVersion = "browser-rendition-exact-video-v1" as const;
+  try {
+    const canonicalBytesSha256 = await hashEncodeOutputBytes(canonicalPath, signal);
+    const renditionBytesSha256 = await hashEncodeOutputBytes(renditionPath, signal);
+    if (!canonicalBytesSha256 || !renditionBytesSha256) throw new Error("Unbounded viewing media");
+    const canonical = await decodeVideo(canonicalPath, signal, tool);
+    const rendition = await decodeVideo(renditionPath, signal, tool);
+    const sourceFrames = nativeOutputFrames(canonical), viewFrames = nativeOutputFrames(rendition);
+    if (canonical.summary.width !== rendition.summary.width || canonical.summary.height !== rendition.summary.height ||
+        sourceFrames.length !== viewFrames.length || canonical.summary.sequenceSha256 !== rendition.summary.sequenceSha256) throw new Error("Different viewing video");
+    const frames = sourceFrames.map((frame, index) => {
+      const view = viewFrames[index]!;
+      return {
+        canonical: nativeInterval(canonical.timeBase, canonical.originSeconds, frame.pts, frame.pts + frame.duration),
+        rendition: nativeInterval(rendition.timeBase, rendition.originSeconds, view.pts, view.pts + view.duration),
+      };
+    });
+    if (frames.some((frame) => [frame.canonical, frame.rendition].some((interval) =>
+      !Number.isFinite(interval.startMilliseconds) || interval.startMilliseconds < 0 ||
+      !Number.isFinite(interval.endMilliseconds) || interval.endMilliseconds <= interval.startMilliseconds))) throw new Error("Unsupported viewing clock");
+    if (canonicalBytesSha256 !== await hashEncodeOutputBytes(canonicalPath, signal) ||
+        renditionBytesSha256 !== await hashEncodeOutputBytes(renditionPath, signal)) throw new Error("Viewing media changed");
+    return { policyVersion, status: "verified", canonicalBytesSha256, renditionBytesSha256, frames };
+  } catch {
+    signal.throwIfAborted();
+    return { policyVersion, status: "unknown", reasonCode: "RENDITION_TIMELINE_UNVERIFIED" };
   }
 }

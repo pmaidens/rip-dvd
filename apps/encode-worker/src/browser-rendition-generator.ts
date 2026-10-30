@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { probeEncodeOutputMedia, type EncodeOutputMediaProbe } from "@rip-dvd/application";
+import { probeEncodeOutputMedia, type EncodeOutputMediaProbe, type measureBrowserRenditionTimeline } from "@rip-dvd/application";
 
 type Conversion = import("@rip-dvd/data-access").BrowserRenditionRecord["conversion"];
 export function browserRenditionCommand(source: string, destination: string, conversion: Conversion) {
@@ -42,6 +42,7 @@ interface ConversionInput {
   signal: AbortSignal; onProgress(percent: number): void; durationSeconds: number;
 }
 export interface BrowserRenditionGenerator {
+  measureTimeline?: typeof measureBrowserRenditionTimeline;
   probe: EncodeOutputMediaProbe;
   version(): Promise<string>;
   generate(input: ConversionInput): Promise<void>;

@@ -1,6 +1,7 @@
 import { canonicalPublicationJson, type DataAccess } from "@rip-dvd/data-access";
 import { hashEncodeOutputBytes, recordedCellOutputInterval } from "./encode-output-cell-correspondence.js";
 import { inspectEncodeOutput, probeEncodeOutputMedia, type EncodeOutputInspection, type EncodeOutputMediaProbe } from "./encode-output-inspection.js";
+import { inspectEncodeOutputViewingLocation } from "./encode-output-viewing-location.js";
 
 export class InvalidEncodeOutputIntervalInputError extends Error {
   constructor() {
@@ -13,12 +14,14 @@ interface IntervalQuery {
   assessmentIdentity: string;
   titleIdentityObservationId: string;
   intervalIndexes: number[];
+  renditionId?: string;
 }
 
 function parseQuery(value: unknown): IntervalQuery {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new InvalidEncodeOutputIntervalInputError();
   const input = value as Record<string, unknown>;
-  if (Object.keys(input).some((key) => !["assessmentIdentity", "titleIdentityObservationId", "intervalIndexes"].includes(key)) ||
+  if (Object.keys(input).some((key) => !["assessmentIdentity", "titleIdentityObservationId", "intervalIndexes", "renditionId"].includes(key)) ||
+      (input.renditionId !== undefined && (typeof input.renditionId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(input.renditionId))) ||
       ![input.assessmentIdentity, input.titleIdentityObservationId].every((id) => typeof id === "string" && id.trim().length > 0 && id.length <= 256) ||
       !Array.isArray(input.intervalIndexes) || input.intervalIndexes.length < 1 || input.intervalIndexes.length > 100 ||
       input.intervalIndexes.some((index) => !Number.isSafeInteger(index) || index < 0) ||
@@ -27,6 +30,7 @@ function parseQuery(value: unknown): IntervalQuery {
     assessmentIdentity: input.assessmentIdentity as string,
     titleIdentityObservationId: input.titleIdentityObservationId as string,
     intervalIndexes: [...input.intervalIndexes] as number[],
+    ...(input.renditionId === undefined ? {} : { renditionId: input.renditionId as string }),
   };
 }
 
@@ -35,7 +39,7 @@ type SourceSnapshot = NonNullable<EncodeOutputInspection["artifact"]["provenance
 type SourceInterval = SourceSnapshot["source"]["assessment"]["items"][number]["estimatedAffectedPlayback"];
 type RecordedInterval = NonNullable<SourceInterval>["intervals"][number];
 
-interface IntervalClassification {
+export interface IntervalClassification {
   intervalIndex: number;
   status: "verified" | "absent" | "unknown";
   sourceInterval: RecordedInterval | null;
@@ -152,7 +156,7 @@ function classifyInterval(
 
 /** Query recorded Estimated Affected Playback, never caller-supplied source estimates. */
 export async function inspectEncodeOutputIntervals(
-  access: DataAccess, artifactIdentity: unknown, input: unknown, mediaProbe?: EncodeOutputMediaProbe,
+  access: DataAccess, artifactIdentity: unknown, input: unknown, mediaProbe?: EncodeOutputMediaProbe, browserRenditionsEnabled?: boolean,
 ) {
   const query = parseQuery(input);
   let observedOutputBytesSha256: string | null = null;
@@ -165,8 +169,10 @@ export async function inspectEncodeOutputIntervals(
   const intervals = query.intervalIndexes.map((index) => classifyInterval(inspection, snapshot, query, index, observedOutputBytesSha256));
   const unknown = intervals.some((interval) => interval.status === "unknown");
   const verified = intervals.every((interval) => interval.status === "verified");
+  const viewing = query.renditionId === undefined ? null
+    : await inspectEncodeOutputViewingLocation(access, query.renditionId, inspection, intervals, browserRenditionsEnabled);
   return {
-    schemaVersion: 1 as const, query, inspection, intervals,
+    schemaVersion: 1 as const, query, inspection, intervals, viewing,
     targetedLocation: { eligible: verified,
       reasonCode: verified ? null : unknown ? "OUTPUT_MAPPING_UNKNOWN" as const : "SOURCE_EXCLUDED_BY_SELECTION" as const,
       reason: verified ? null : unknown ? "No verified output location is available for all requested source intervals."

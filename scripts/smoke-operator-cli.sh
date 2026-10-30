@@ -95,7 +95,7 @@ printf '%s\n' "$receipt_help" | assert_json_fields 'schemaVersion=1'
 set +e
 interval_output="$(invoke encode-output intervals \
   encode-output-v1.published.00000000-0000-4000-8000-000000000000 \
-  --json '{"assessmentIdentity":"synthetic-assessment","titleIdentityObservationId":"synthetic-observation","intervalIndexes":[0]}' \
+  --json '{"assessmentIdentity":"synthetic-assessment","titleIdentityObservationId":"synthetic-observation","intervalIndexes":[0],"renditionId":"00000000-0000-4000-8000-000000000001"}' \
   2>"$temporary_directory/interval.stderr")"
 interval_status=$?
 set -e

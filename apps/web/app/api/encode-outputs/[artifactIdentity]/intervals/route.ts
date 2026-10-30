@@ -14,7 +14,7 @@ function response(body: unknown, status = 200): Response {
 
 export async function createEncodeOutputIntervalsRoute(
   request: Request, artifactIdentity: string,
-  getAccess: () => DataAccess = getDataAccess, mediaProbe?: EncodeOutputMediaProbe,
+  getAccess: () => DataAccess = getDataAccess, mediaProbe?: EncodeOutputMediaProbe, browserRenditionsEnabled?: boolean,
 ): Promise<Response> {
   try {
     const parameters = new URL(request.url).searchParams;
@@ -26,6 +26,7 @@ export async function createEncodeOutputIntervalsRoute(
     try { input = JSON.parse(parameters.get("query")!); }
     catch { throw new InvalidEncodeOutputIntervalInputError(); }
     return response(await createApplicationOperations(getAccess(), {
+      browserRenditionsEnabled,
       ...(mediaProbe === undefined ? {} : { encodeOutputMediaProbe: mediaProbe }),
     }).inspectEncodeOutputIntervals(artifactIdentity, input));
   } catch (error) {

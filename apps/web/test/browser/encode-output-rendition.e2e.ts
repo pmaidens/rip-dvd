@@ -163,3 +163,74 @@ test("reviews a selected subtitle and queues a separate burned rendition through
   expect(created.id).not.toBe(seeded.id);
   expect(await (await request.get(`/api/browser-renditions/${seeded.id}`)).json()).toMatchObject({ status: "complete", conversion: { subtitles: "omitted" } });
 });
+
+// Authored correspondence responses isolate browser interaction from the
+// separately tested CLI/HTTP classification and real rendition clock producer.
+test.describe("authored output correspondence", () => {
+// Service-worker control can bypass page.route in WebKit after navigation.
+// Keep the authored responses deterministic; ordinary media tests above still
+// exercise the application's normal service-worker behavior.
+test.use({ serviceWorkers: "block" });
+for (const state of ["verified", "absent", "unknown", "changed_on_seek"] as const) {
+  test(`only seeks a freshly proved output target, authored correspondence=${state}`, async ({ page }) => {
+    let inspection: Record<string, any>;
+    let checks = 0;
+    const mutations: string[] = [];
+    await page.route(`**/api/encode-outputs/${seeded.identity}`, async (route) => {
+      if (route.request().method() !== "GET") { mutations.push(route.request().method()); await route.continue(); return; }
+      const response = await route.fetch();
+      inspection = await response.json();
+      const source = inspection.artifact.provenance.sourceSnapshot.source;
+      source.assessment.items = [{ titleIdentityObservationId: "synthetic-browser-title", estimatedAffectedPlayback: {
+        intervals: [{ startMilliseconds: 1000, endMilliseconds: 5000, coverage: "whole_cell" }], unknownCoverage: [],
+      } }];
+      await route.fulfill({ response, json: inspection });
+    });
+    await page.route(`**/api/encode-outputs/${seeded.identity}/intervals?*`, async (route) => {
+      checks += 1;
+      const query = JSON.parse(new URL(route.request().url()).searchParams.get("query")!);
+      const status = state === "changed_on_seek" ? checks === 1 ? "verified" : "unknown" : state;
+      await route.fulfill({ json: { schemaVersion: 1, query, inspection, intervals: [{ intervalIndex: 0, status,
+        outputInterval: status === "verified" ? { startMilliseconds: 1100, endMilliseconds: 2200 } : null,
+        reasonCode: status === "verified" ? "OUTPUT_CELL_CONTENT_VERIFIED" : status === "absent" ? "SOURCE_EXCLUDED_BY_SELECTION" : "OUTPUT_TRUNCATED",
+        reason: status === "absent" ? "Synthetic selected source is proved excluded." : status === "unknown" ? "Synthetic output truncation leaves correspondence unknown." : "Synthetic evidenced whole-cell envelope.",
+      }], viewing: { renditionId: seeded.id, mediaIdentity: `browser-rendition-v1.${seeded.id}`,
+        reasonCode: null, reason: null, targets: status === "verified" ? [{ intervalIndex: 0,
+          canonicalOutputInterval: { startMilliseconds: 1100, endMilliseconds: 2200 },
+          renditionInterval: { startMilliseconds: 1200, endMilliseconds: 2300 }, seekSeconds: 1.2 }] : [] } } });
+    });
+    const { video, panel } = await openFailedRendition(page);
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.seekable.length)).toBeGreaterThan(0);
+    await panel.getByLabel("Estimated Affected Playback interval").selectOption({ index: 1 });
+    await panel.getByRole("button", { name: "Check output correspondence" }).click();
+    await expect(panel).toContainText(`Correspondence: ${state === "changed_on_seek" ? "verified" : state}`);
+    const seek = panel.getByRole("button", { name: "Seek to verified output interval" });
+    if (state === "verified" || state === "changed_on_seek") {
+      await expect(panel).toContainText("Canonical seek target: 1.1 seconds");
+      await expect(panel).toContainText("Rendition seek target: 1.2 seconds");
+      await seek.click();
+      await expect.poll(() => checks).toBe(2);
+      if (state === "verified") {
+        await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1.2, 1);
+        await expect(panel).toContainText("Seek requested at 1.2 seconds");
+      } else {
+        await expect(panel).toContainText("Correspondence: unknown");
+        await expect(seek).toHaveCount(0);
+        expect(await video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBe(0);
+      }
+    } else {
+      await expect(seek).toHaveCount(0);
+      expect(await video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBe(0);
+      await expect(panel).toContainText(state === "absent" ? "SOURCE_EXCLUDED_BY_SELECTION" : "OUTPUT_TRUNCATED");
+    }
+    await expect(panel).toContainText("Validation-failed source");
+    await expect(panel).toContainText("separate MP4");
+    // Ordinary controls remain usable in every classification.
+    await video.evaluate(async (element: HTMLVideoElement) => { element.currentTime = 0.2; element.muted = false; await element.play(); });
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.3);
+    await expect(panel).toContainText("Validation-failed source");
+    expect(mutations).toEqual([]);
+  });
+}
+});

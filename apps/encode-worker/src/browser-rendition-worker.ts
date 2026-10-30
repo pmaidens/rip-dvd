@@ -3,7 +3,7 @@ import { mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { browserRenditionConfig } from "@rip-dvd/config";
-import { EncodeOutputExportRejectedError, exportEncodeOutput, inspectEncodeOutputRenditionAvailability } from "@rip-dvd/application";
+import { EncodeOutputExportRejectedError, exportEncodeOutput, inspectEncodeOutputRenditionAvailability, measureBrowserRenditionTimeline } from "@rip-dvd/application";
 import { canonicalPublicationJson, encodeOutputFilesystemIdentity, type DataAccess } from "@rip-dvd/data-access";
 import { acquireKernelProcessLock } from "@rip-dvd/worker-runtime";
 
@@ -77,6 +77,11 @@ export async function pollBrowserRenditions(options: Options) {
           (target.kind === "video" && target.mode === "transcode" && (stream.pixelFormat !== "yuv420p" || stream.profile !== "High" || stream.level !== 41)) ||
           (target.kind === "audio" && target.mode === "transcode" && stream.profile !== "LC");
       })) throw new Error("RENDITION_CONVERSION_FAILED");
+      // Video conversion may change decoded frames. Preserve ordinary playback
+      // when a bounded exact clock proof cannot be established.
+      record.timeline = record.conversion.streams?.find((stream) => stream.kind === "video")?.mode === "transcode"
+        ? { policyVersion: "browser-rendition-exact-video-v1", status: "unknown", reasonCode: "RENDITION_TIMELINE_UNVERIFIED" }
+        : await (media.measureTimeline ?? measureBrowserRenditionTimeline)(source, partial, options.signal);
       const file = await open(partial, constants.O_RDWR | constants.O_NOFOLLOW);
       try {
         if (!(await file.stat()).isFile() || (await file.stat()).size === 0) throw new Error("RENDITION_CONVERSION_FAILED");
