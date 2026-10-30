@@ -74,7 +74,8 @@ These contracts are also relevant to work on Encode Output playback:
   deletion or proven absence, the rendition worker removes its owned MP4 directory
   under its execution lock, synchronizes the parent directory before committing
   absence, and preserves request/conversion history. Eligibility uses the exact
-  artifact's durable removal outcome even when deleting a sibling clip failed;
+  artifact's durable removal outcome and direct missing-file observation, even
+  when aggregate failure masks that absence or deleting a sibling clip failed;
   `previewCondition.canonicalMediaRemoved` reports this separately from the
   aggregate canonical deletion status. A cleanup failure keeps the media reference
   and a failure reason for retry while unrelated queued renditions continue. A source

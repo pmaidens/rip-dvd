@@ -16,11 +16,13 @@ function retainedPreview(access: DataAccess, identity: unknown, targets?: Return
   if (!record) throw new RecordNotFoundError("Damage Preview", id);
   const artifact = record.artifacts.find((candidate) => candidate.identity === identity);
   if (!artifact) throw new BrowserRenditionRejectedError("DAMAGE_PREVIEW_MEDIA_UNAVAILABLE");
-  const preview = describeDamagePreview(access, record, targets, false, null);
-  return { record, artifact, preview, media: preview.artifacts.find((candidate) => candidate.identity === identity)!.media };
+  const mediaTargets = targets ?? previewMediaTargets(record);
+  const preview = describeDamagePreview(access, record, mediaTargets, false, null);
+  const canonicalFile = mediaTargets.find((candidate) => candidate.identity === identity)!.observation;
+  return { record, artifact, preview, canonicalFile, media: preview.artifacts.find((candidate) => candidate.identity === identity)!.media };
 }
-function previewCondition({ record, artifact, preview, media }: ReturnType<typeof retainedPreview>) {
-  const canonicalMediaRemoved = ["removed", "missing"].includes(media.state) ||
+function previewCondition({ record, artifact, preview, canonicalFile, media }: ReturnType<typeof retainedPreview>) {
+  const canonicalMediaRemoved = canonicalFile.state === "missing" || media.state === "removed" ||
     record.mediaRemoval?.outcomes.some((outcome) => outcome.identity === artifact.identity &&
       ["removed", "already_missing"].includes(outcome.outcome)) === true;
   return { canonicalMediaRemoved, status: preview.status, generationStatus: preview.generationStatus, outdated: preview.outdated,

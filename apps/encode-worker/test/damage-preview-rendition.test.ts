@@ -137,3 +137,29 @@ it("reports an orphan cleanup failure without blocking an unrelated queued rendi
     access.close();
   }
 });
+
+it("cleans a derivative when a failed canonical removal later has a missing file, preserving the failure history", async () => {
+  const { unlinkSync } = await import("node:fs");
+  const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
+  const seeded = await requestSyntheticPreviewRendition(fixture);
+  const access = fixture.openAccess();
+  try {
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    const derivative = access.browserRenditions.find(seeded.request.id)!.media!.path;
+    const preview = await seeded.inspect();
+    expect(await fixture.run(["damage-preview", "delete", seeded.id, "--key", "synthetic-failed-then-missing-removal", "--json", JSON.stringify({ mediaToken: preview.media.token })])).toMatchObject({ exitCode: 0 });
+    writeFileSync(seeded.path, "synthetic identity change prevents canonical deletion");
+    settleDamagePreviewMedia(fixture);
+    expect(await seeded.inspect()).toMatchObject({ media: { removal: { state: "failed", outcomes: [{ outcome: "failed" }] } } });
+    // A failed removal can leave an absent file, for example after unlink
+    // succeeds but its directory synchronization fails. Preserve that failure
+    // while observing the artifact's current absence independently.
+    unlinkSync(seeded.path);
+    await pollBrowserRenditions({ access, mediaLibraryPath: fixture.mediaLibraryPath, signal: new AbortController().signal, generator, enabled: true });
+    expect(existsSync(derivative)).toBe(false);
+    expect(await fixture.run(["damage-preview", "inspect-rendition", seeded.request.id])).toMatchObject({ exitCode: 0, result: {
+      media: null, previewCondition: { canonicalMediaRemoved: true, canonicalMedia: { state: "removal_failed" } },
+    } });
+    expect(await seeded.inspect()).toMatchObject({ media: { removal: { state: "failed", outcomes: [{ outcome: "failed" }] } } });
+  } finally { access.close(); }
+});
