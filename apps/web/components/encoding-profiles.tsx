@@ -77,7 +77,7 @@ export function EncodingProfilesView({
   }
 
   return (
-    <section className="encoding-profiles" aria-labelledby="profiles-title">
+    <section id="encoding-profiles" className="encoding-profiles" aria-labelledby="profiles-title">
       <header className="profiles-header">
         <div>
           <p className="section-eyebrow">Reusable settings</p>
@@ -240,11 +240,7 @@ export function EncodingProfilesView({
   );
 }
 
-export function EncodingProfilesManager({
-  onChanged = () => undefined,
-}: {
-  onChanged?: () => void;
-}) {
+export function EncodingProfilesManager() {
   const mounted = useRef(false);
   const loadedProfiles = useRef<EncodingProfileDto[] | null>(null);
   const [state, setState] = useState<EncodingProfilesLoadState>({
@@ -356,9 +352,6 @@ export function EncodingProfilesManager({
       }
       pendingMutation.current = null;
       await load();
-      if (mounted.current) {
-        onChanged();
-      }
     } catch {
       if (mounted.current) {
         setHasRequestError(true);

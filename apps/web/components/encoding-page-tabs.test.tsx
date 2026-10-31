@@ -629,7 +629,7 @@ describe("encoding page tabs", () => {
     }
   );
 
-  it("keeps the in-memory worklist when moving between accessible tabs", async () => {
+  it("keeps the in-memory worklist between tabs and refreshes choices on a cached page return", async () => {
     const selectionId = "selection-1" as DiscSelectionId;
     const profileId = "profile-1" as EncodingProfileId;
     const snapshot: DashboardSnapshot = {
@@ -651,12 +651,13 @@ describe("encoding page tabs", () => {
         return () => undefined;
       },
     );
+    let profileActive = true;
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/encoding-profiles") {
-        return Response.json({ profiles: [] });
-      }
       if (path.startsWith("/api/encode-jobs?")) {
+        if (!profileActive && new URL(path, "http://localhost").searchParams.has("encodingProfileId")) {
+          return Response.json({ error: "Encoding Profile not found" }, { status: 404 });
+        }
         return Response.json({
           historyGroup: "not_encoded",
           query: "",
@@ -673,11 +674,11 @@ describe("encoding page tabs", () => {
             suggestedOutputPath:
               "/media/movies/Keep this worklist row (2001).mkv",
           }],
-          profiles: [{
+          profiles: profileActive ? [{
             id: profileId,
             displayName: "DVD library",
             version: 1,
-          }],
+          }] : [],
           page: {
             offset: 0,
             limit: 20,
@@ -717,13 +718,14 @@ describe("encoding page tabs", () => {
       expect(tabs.map((tab) => tab.textContent)).toEqual([
         "Current jobs",
         "Queue new jobs",
-        "Settings",
       ]);
       expect(tabs.map((tab) => tab.getAttribute("aria-controls"))).toEqual([
         "encoding-panel-current",
         "encoding-panel-queue",
-        "encoding-panel-settings",
       ]);
+      expect(container.querySelector('a[href="/settings#encoding-profiles"]')?.textContent)
+        .toBe("Manage Encoding Profiles");
+      expect(container.querySelector('input[name="key"]')).toBeNull();
       expect(tabs[0]?.getAttribute("aria-selected")).toBe("true");
       expect(container.textContent).toContain("queued title");
       expect(container.querySelector("#encoding-panel-current")?.textContent)
@@ -777,11 +779,17 @@ describe("encoding page tabs", () => {
       expect(container.querySelector(".encode-worklist-table")?.textContent)
         .toContain("Keep this worklist row");
 
-      await act(async () => tabs[2]?.click());
+      await act(async () => {
+        tabs[1]?.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+        }));
+      });
+      expect(tabs[0]?.getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(tabs[0]);
       expect(container.querySelector("#encoding-panel-queue")?.hasAttribute(
         "hidden",
       )).toBe(true);
-      await act(async () => tabs[0]?.click());
       await act(async () => tabs[1]?.click());
 
       expect(container.querySelector(".encode-worklist-table")?.textContent)
@@ -789,6 +797,19 @@ describe("encoding page tabs", () => {
       expect(container.querySelector<HTMLSelectElement>(
         'select[name="encodingProfileId"]',
       )?.value).toBe(profileId);
+
+      profileActive = false;
+      await act(async () => {
+        window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+        await settle();
+      });
+      await act(async () => { await settle(); });
+      expect(container.querySelector(`option[value="${profileId}"]`)).toBeNull();
+      expect(container.querySelector<HTMLSelectElement>(
+        'select[name="encodingProfileId"]',
+      )?.disabled).toBe(true);
+      expect(container.querySelector(".encode-worklist-table")?.textContent)
+        .toContain("Keep this worklist row");
     } finally {
       await act(async () => root.unmount());
     }

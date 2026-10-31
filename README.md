@@ -1468,7 +1468,17 @@ The canonical catalog terms are:
 
 ### Encoding Profiles
 
-The operations dashboard includes an Encoding Profiles workspace for DVD video.
+Open Settings > Encoding Profiles, or follow Manage Encoding Profiles from
+Encoding, to manage DVD video profiles. The section is directly addressable at
+`/settings#encoding-profiles`, including after refresh and with browser Back and
+Forward. Notifications and Encoding Profiles load independently and each offers
+its own retry controls when a request fails.
+
+Return to Encoding through primary navigation to queue new Encode Jobs with
+the current active profile choices. Current jobs and Queue new jobs remain in
+Encoding. Switching between those tabs retains the in-memory worklist, while
+full page navigation may discard a draft.
+
 Each logical profile starts at version 1 with immutable HandBrake preset and MKV
 container settings. Creating a new version inserts the next sequential version
 without changing older records, so existing Encode Jobs retain the exact
