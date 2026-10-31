@@ -58,8 +58,11 @@ test("installs metadata and opts in, displays the queued test, navigates, and op
   await expect(page.getByRole("list", { name: "Recent notification deliveries" })).toContainText("Attempts: 2");
   expect(sent.length).toBeGreaterThan(0);
   for (const payload of sent) {
+    expect(payload).toMatchObject({ destination: "/settings#notifications" });
     await deliverPush(worker, JSON.stringify(payload));
   }
+  await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.data.destination)))
+    .toContain("http://localhost:3101/settings#notifications");
   await expect.poll(async () => worker.evaluate(async () => (await self.registration.getNotifications()).map((notification) => notification.title))).toContain("Rip DVD test");
   await page.goto("/catalog");
   await worker.evaluate(async () => {
@@ -71,6 +74,7 @@ test("installs metadata and opts in, displays the queued test, navigates, and op
     await Promise.allSettled(lifetime);
   });
   await expect(page).toHaveURL(/\/settings#notifications$/);
+  expect(context.pages()).toHaveLength(1);
   await expect(page.getByRole("button", { name: "Disable notifications", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => localStorage.getItem("rip-dvd.notifications.subscription"))).toBe(subscriptionId);
   await page.getByRole("button", { name: "Disable notifications", exact: true }).click();
@@ -87,6 +91,23 @@ test("installs metadata and opts in, displays the queued test, navigates, and op
   expect(await page.evaluate(() => localStorage.getItem("synthetic-permission-prompts"))).toBe("1");
 });
 
+test("keeps delivered legacy test links usable in the existing application window", async ({ page, context }) => {
+  await controlledSubscription(page);
+  await page.goto("/settings#notifications");
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  const worker = context.serviceWorkers()[0];
+  await deliverPush(worker, JSON.stringify({ version: 1, title: "Synthetic legacy test", body: "Queued before the update",
+    tag: "synthetic-legacy-test", destination: "/notifications" }));
+  await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.data.destination)))
+    .toContain("http://localhost:3101/notifications");
+  await page.goto("/catalog");
+  await clickNotification(worker, "synthetic-legacy-test");
+  await expect(page).toHaveURL("/settings#notifications");
+  await expect(page.getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
+  expect(context.pages()).toHaveLength(1);
+  expect(await page.evaluate(() => localStorage.getItem("synthetic-permission-prompts"))).toBeNull();
+});
+
 test("handles malformed push data, missing labels and unsafe click destinations", async ({ page, context }) => {
   await context.grantPermissions(["notifications"], { origin: "http://localhost:3101" });
   await controlledSubscription(page);
@@ -97,6 +118,8 @@ test("handles malformed push data, missing labels and unsafe click destinations"
   await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
   await deliverPush(worker, "not-json");
   await expect.poll(async () => worker.evaluate(async () => (await self.registration.getNotifications()).map((notification) => notification.title))).toContain("Unlabelled disc");
+  await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.data.destination)))
+    .toContain("http://localhost:3101/settings#notifications");
   await worker.evaluate(async () => {
     await self.registration.showNotification("Synthetic unsafe destination", { data: { destination: "https://outside.example/" } });
     const notification = (await self.registration.getNotifications()).find((item) => item.title === "Synthetic unsafe destination")!;
@@ -126,6 +149,28 @@ test("handles malformed push data, missing labels and unsafe click destinations"
   await expect(page).toHaveURL(/\/notifications\/target\?kind=archive-jobs&id=synthetic-missing$/);
   await expect(page.getByText("This notification target is no longer available.", { exact: false })).toBeVisible();
   await expect(page.getByRole("link", { name: "Notification settings", exact: true })).toHaveAttribute("href", "/settings#notifications");
+});
+
+test("uses the Settings fallback for unsafe pushes and revalidates untrusted click data", async ({ page, context }) => {
+  await controlledSubscription(page);
+  await page.goto("/settings#notifications");
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  const worker = context.serviceWorkers()[0];
+  for (const destination of ["https://outside.example/", "//outside.example/settings#notifications", "javascript:alert(1)",
+    "http://operator:synthetic@localhost:3101/settings#notifications", "http://localhost:3100/settings#notifications", "/api/notifications"]) {
+    await deliverPush(worker, JSON.stringify({ version: 1, title: "Synthetic unsafe push", body: "Unsafe destination",
+      tag: "synthetic-unsafe-push", destination }));
+    await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).find((item) => item.tag === "synthetic-unsafe-push")?.data.destination))
+      .toBe("http://localhost:3101/settings#notifications");
+    // Click data is checked independently of push-time sanitization.
+    await worker.evaluate(async (destination) => {
+      await self.registration.showNotification("Synthetic unsafe click", { tag: "synthetic-unsafe-click", data: { destination } });
+    }, destination);
+    await page.goto("/catalog");
+    await clickNotification(worker, "synthetic-unsafe-click");
+    await expect(page).toHaveURL("/settings#notifications");
+    expect(context.pages()).toHaveLength(1);
+  }
 });
 
 test("opens a labeled Archive Job target using its current shared operation detail", async ({ page }) => {

@@ -33,7 +33,9 @@ it("keeps direct JSON CLI and HTTP notification operations equivalent with real 
     expect(event).toEqual((await fixture.run(["notifications", "test", "--key", "synthetic-http-test"])).result);
     expect(await (await request("deliveries")).json()).toEqual((await fixture.run(["notifications", "deliveries"])).result);
     const timestamp = new Date();
-    await dispatchNotifications(access, async () => { throw { statusCode: 429, headers: { "retry-after": "60" }, body: "Sensitive provider detail" }; }, { now: () => timestamp });
+    const sent: unknown[] = [];
+    await dispatchNotifications(access, async (_subscription, payload) => { sent.push(payload); throw { statusCode: 429, headers: { "retry-after": "60" }, body: "Sensitive provider detail" }; }, { now: () => timestamp });
+    expect(sent).toMatchObject([{ version: 1, title: "Rip DVD test", destination: "/settings#notifications" }]);
     const retrying = await (await request("deliveries")).json();
     expect(retrying).toMatchObject({ deliveries: [{ status: "retrying", failureCode: "throttled", attemptCount: 1,
       nextAttemptAt: new Date(timestamp.getTime() + 60_000).toISOString() }] });

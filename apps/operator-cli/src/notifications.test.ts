@@ -13,7 +13,7 @@ import type { TLSSocket } from "node:tls";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { sql } from "drizzle-orm";
 import { createNotificationEventWriter } from "@rip-dvd/data-access";
-import { createWebPushSender, dispatchNotifications, readNotificationConfiguration, recordNotificationOutcome } from "@rip-dvd/application";
+import { createWebPushSender, dispatchNotifications, formatNotification, readNotificationConfiguration, recordNotificationOutcome } from "@rip-dvd/application";
 
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
@@ -70,7 +70,7 @@ it("queues once, survives process restart, and reports provider acceptance witho
     access.close();
     console.log(JSON.stringify(sent));
   `, fixture.databasePath], { encoding: "utf8" });
-  expect(JSON.parse(output)).toMatchObject([{ version: 1, title: "Rip DVD test", destination: "/notifications", tag: expect.stringMatching(/^rip-dvd-/) }]);
+  expect(JSON.parse(output)).toMatchObject([{ version: 1, title: "Rip DVD test", destination: "/settings#notifications", tag: expect.stringMatching(/^rip-dvd-/) }]);
   const after = await fixture.run(["notifications", "deliveries"]);
   expect(after.result).toMatchObject({ deliveries: [{ status: "accepted", failureCode: null }] });
   const inspected = await fixture.run(["notifications", "subscriptions"]);
@@ -78,6 +78,26 @@ it("queues once, survives process restart, and reports provider acceptance witho
   const access = fixture.openAccess();
   try { expect(await dispatchNotifications(access, async () => { throw new Error("must not resend"); })).toEqual({ accepted: 0, failed: 0 }); }
   finally { access.close(); }
+});
+
+it("replays a test queued before the Settings update without changing its legacy payload or duplicating delivery", async () => {
+  const { fixture, subscription } = configure();
+  await register(fixture, subscription, "synthetic-legacy-registration");
+  const mutationKey = "synthetic-legacy-test";
+  const event = formatNotification({ kind: "test", sourceEventId: `test:${mutationKey}` });
+  event.payload.destination = "/notifications";
+  const access = fixture.openAccess();
+  try {
+    const original = access.notifications.submitTest({ mutationKey, event });
+    const replay = await fixture.run(["notifications", "test", "--key", mutationKey]);
+    expect(replay.exitCode).toBe(0);
+    expect(replay.result).toMatchObject({ ...original, status: "queued" });
+    const sent: unknown[] = [];
+    await dispatchNotifications(access, async (_subscription, payload) => { sent.push(payload); });
+    expect(sent).toEqual([event.payload]);
+    expect((await fixture.run(["notifications", "test", "--key", mutationKey])).result).toEqual(replay.result);
+    expect((await fixture.run(["notifications", "deliveries"])).result).toMatchObject({ deliveries: [{ eventId: original.eventId, status: "accepted" }] });
+  } finally { access.close(); }
 });
 
 it("does not replay historical events to new or re-enabled browsers and keeps reconciliation opted out", async () => {
@@ -138,6 +158,13 @@ it("rejects unsafe destinations and malformed keys, bounds inspection, and enfor
   await register(fixture, subscription, "synthetic-conflict");
   const conflict = await fixture.run(["notifications", "register", "--key", "synthetic-conflict", "--json", JSON.stringify({ subscription, enable: false })]);
   expect(conflict.result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
+  const mutationKey = "synthetic-changed-legacy-test";
+  const event = formatNotification({ kind: "test", sourceEventId: `test:${mutationKey}` });
+  event.payload = { ...event.payload, destination: "/notifications", body: "Synthetic changed notification facts" };
+  const access = fixture.openAccess();
+  try { access.notifications.submitTest({ mutationKey, event }); }
+  finally { access.close(); }
+  expect((await fixture.run(["notifications", "test", "--key", mutationKey])).result).toMatchObject({ error: { code: "MUTATION_KEY_CONFLICT" } });
   expect((await fixture.run(["notifications", "deliveries", "--limit", "101"])).result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
 });
 
