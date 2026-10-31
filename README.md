@@ -1725,7 +1725,8 @@ tests against isolated SQLite files.
 - `docker/runtime.Dockerfile`: shared multi-target definition for role-specific images
 - `compose.yaml`: local four-service deployment
 
-Browser push setup, opt-in and JSON CLI administration are described in
+Open Settings > Notifications in the web interface for browser push controls
+and recent deliveries. Browser push setup, opt-in and JSON CLI administration are described in
 [Browser notifications](docs/notifications.md).
 
 ### Encode Output browser playback

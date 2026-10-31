@@ -29,7 +29,7 @@ test("upgrades an open app without replacing its subscription or reloading, and 
   writeFileSync(override, oldWorker);
   await controlledSubscription(page);
   await page.clock.install();
-  await page.goto("/notifications");
+  await page.goto("/settings#notifications");
   await page.getByRole("button", { name: "Enable notifications", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("Notifications enabled on this browser.");
   const old = await activeWorker(page);
@@ -44,7 +44,7 @@ test("upgrades an open app without replacing its subscription or reloading, and 
   const payload = JSON.stringify({ version: 1, title: "Synthetic compatible test", body: "Synthetic outcome", tag: "synthetic-update-test", destination: "https://outside.example/" });
   await deliverPush(old, payload);
   await clickNotification(old, "synthetic-update-test");
-  await expect(page).toHaveURL(/\/notifications$/);
+  await expect(page).toHaveURL(/\/settings#notifications$/);
   await expect(page.getByRole("button", { name: "Disable notifications", exact: true })).toBeEnabled();
   const before = await page.evaluate(async () => {
     const registration = (await navigator.serviceWorker.getRegistration("/"))!;
@@ -80,7 +80,7 @@ test("upgrades an open app without replacing its subscription or reloading, and 
   for (const payload of queued) await deliverPush(worker, JSON.stringify(payload));
   await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.title))).toContain("Rip DVD test");
   await clickNotification(worker, "synthetic-update-test");
-  await expect(page).toHaveURL(/\/notifications$/);
+  await expect(page).toHaveURL(/\/settings#notifications$/);
   expect(context.pages()).toHaveLength(1);
 });
 
@@ -91,7 +91,7 @@ for (const failure of [
   test(`keeps the known-good worker and subscription controls usable after a ${failure.name}`, async ({ page, context }) => {
     await controlledSubscription(page);
     await page.clock.install();
-    await page.goto("/notifications");
+    await page.goto("/settings#notifications");
     await page.getByRole("button", { name: "Enable notifications", exact: true }).click();
     await expect(page.getByRole("status")).toHaveText("Notifications enabled on this browser.");
     const knownGood = await activeWorker(page);

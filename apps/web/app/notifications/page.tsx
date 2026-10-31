@@ -1,3 +1,5 @@
-import { NotificationSettings } from "../../components/notification-settings";
+import { permanentRedirect } from "next/navigation";
 
-export default function NotificationsPage() { return <NotificationSettings />; }
+export default function NotificationsPage() {
+  permanentRedirect("/settings#notifications");
+}

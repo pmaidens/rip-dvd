@@ -3805,6 +3805,11 @@ h3 {
 }
 
 .notification-settings { max-width: 54rem; margin: 2rem auto; padding: 0 1rem; }
+.settings-page { max-width: 54rem; margin: 2rem auto; padding: 0 1rem; }
+.settings-page section { scroll-margin-top: 12rem; }
+.settings-section-navigation { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-block: 1rem 2rem; }
+.settings-section-navigation a { padding: 0.7rem 1rem; border: 1px solid #45635c; border-radius: 0.65rem; color: #f5d99f; }
+.settings-section-navigation a:focus-visible { outline: 3px solid #d2a14b; outline-offset: 3px; }
 .notification-controls { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-block: 1rem; }
 .notification-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 

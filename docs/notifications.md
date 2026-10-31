@@ -1,6 +1,18 @@
 # Browser notifications
 
-Open Notifications for current-browser status, opt-in, opt-out and a test.
+Open Settings in primary navigation, then Notifications, for current-browser
+status, opt-in, opt-out, a test and recent deliveries. Bookmark
+`/settings#notifications` to open this section directly. Section links work
+after refresh and with browser Back and Forward. Opening Settings or following
+a section link never requests permission or enables an opted-out browser.
+Existing subscriptions and saved opt-out choices continue to apply.
+
+The legacy `/notifications` page redirects to `/settings#notifications`, so
+bookmarks, queued test notifications and older worker fallbacks still reach
+the controls. Operational links under `/notifications/target` retain their
+Archive Job or Original Disc Archive details and query parameters. Their
+Notification settings link opens the new Settings section.
+
 On iPhone, open the app in Safari, use Share > Add to Home Screen, then open
 that app and enable notifications. Permission is requested only after the
 Enable notifications button is tapped. Denied permission must be changed in
@@ -139,7 +151,7 @@ subscription; other permanent rejections fail that delivery without disabling a
 valid browser. Disabling cancels queued and retrying work, including claims that
 have not finished. A new eligible generation never inherits an earlier delivery.
 
-Notifications shows recent queued, retrying, accepted, expired and failed
+The Notifications section shows recent queued, retrying, accepted, expired and failed
 deliveries. `rip-dvd notifications deliveries` returns the same redacted failure
 codes, attempt counts, next attempt times and expiry. Provider response bodies,
 endpoints and keys never appear in those diagnostics. Acceptance means only that

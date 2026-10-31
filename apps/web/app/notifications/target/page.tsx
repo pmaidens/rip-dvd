@@ -82,6 +82,6 @@ export default async function NotificationTargetPage({ searchParams }: {
     </section>}
     <p><Link href="/discs">Disc intake and Archive Jobs</Link></p>
     <p><Link href="/catalog">Catalog and saved archives</Link></p>
-    <p><Link href="/notifications">Notification settings</Link></p>
+    <p><Link href="/settings#notifications">Notification settings</Link></p>
   </main>;
 }
