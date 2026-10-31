@@ -799,8 +799,10 @@ semantic review, authorize only the frozen SHA with
 `--approve-review REVIEWED_FULL_SHA`. The classifier flags migrations,
 schema changes without migrations, Compose mounts and devices, required
 environment changes, Dockerfiles, lockfiles, deployment and recovery scripts,
-and optical-drive identity policy. Truncated Git inventories or bounded review
-bundles also require review rather than failing open. The classifier identifies
+and optical-drive identity policy. Git review commands drain their output while
+retaining at most 1 MiB per stream, so large diffs do not exhaust a subprocess
+capture buffer. Truncated Git inventories or bounded review bundles also require
+review rather than failing open. The classifier identifies
 review work. It does not prove arbitrary SQL or configuration safe.
 
 Every command ends with one bounded line prefixed

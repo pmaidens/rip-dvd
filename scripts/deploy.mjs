@@ -30,6 +30,7 @@ import {
 } from "./deploy-state.mjs";
 import {
   REPOSITORY_ROOT,
+  runChecked,
   runCheckedSync,
   runStreaming,
   sanitizeText,
@@ -88,7 +89,7 @@ function usage() {
   ].join("\n");
 }
 
-function gitPlan(config) {
+async function gitPlan(config) {
   const oldCommit = runCheckedSync("git", ["rev-parse", "HEAD"]).stdout.trim();
   runCheckedSync("git", ["fetch", "--prune", config.remote]);
   const targetCommit = runCheckedSync("git", ["rev-parse", "--verify", `${config.targetRef}^{commit}`]).stdout.trim();
@@ -99,7 +100,7 @@ function gitPlan(config) {
   if (ancestry.status !== 0) {
     throw new DeploymentError("validation_failure", "Current commit is not an ancestor of the deployment target", { oldCommit, targetCommit });
   }
-  const commitResult = runCheckedSync("git", ["log", "--format=%H%x09%s", "--no-merges", `${oldCommit}..${targetCommit}`]);
+  const commitResult = await runChecked("git", ["log", "--format=%H%x09%s", "--no-merges", `${oldCommit}..${targetCommit}`]);
   const commitOutput = commitResult.stdout;
   const commits = commitOutput.trim().split(/\r?\n/u).filter(Boolean).map((line) => {
     const [sha, ...subject] = line.split("\t");
@@ -108,9 +109,9 @@ function gitPlan(config) {
       subject: sanitizeText(subject.join("\t"), 1000, config.storagePaths),
     };
   });
-  const filesResult = runCheckedSync("git", ["diff", "--name-status", "-z", `${oldCommit}..${targetCommit}`]);
+  const filesResult = await runChecked("git", ["diff", "--name-status", "-z", `${oldCommit}..${targetCommit}`]);
   const files = parseNameStatus(filesResult.stdout);
-  const diffResult = runCheckedSync("git", [
+  const diffResult = await runChecked("git", [
     "diff",
     "--no-ext-diff",
     "--unified=40",
@@ -143,9 +144,9 @@ function gitPlan(config) {
     files,
     diff: diffResult.stdout,
     inventoryIncomplete:
-      commitResult.stdoutTruncated
-      || filesResult.stdoutTruncated
-      || diffResult.stdoutTruncated,
+      [commitResult, filesResult, diffResult].some(
+        (result) => result.stdoutTruncated || result.stderrTruncated,
+      ),
   };
 }
 
@@ -175,7 +176,7 @@ async function createPlan(options) {
     const runtime = runtimeSnapshot(config);
     await lock.assertHeld();
     run = progress(run, "fetch", "Fetching the deployment remote and freezing the reviewed target.");
-    const git = gitPlan(config);
+    const git = await gitPlan(config);
     await lock.assertHeld();
     const review = buildReviewBundle(
       git.oldCommit,
