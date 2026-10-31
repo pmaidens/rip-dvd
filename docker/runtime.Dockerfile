@@ -136,6 +136,7 @@ FROM shared-builder AS web-builder
 # sources in the builder; the web image copies only standalone output.
 COPY apps/archive-worker/src apps/archive-worker/src
 COPY apps/encode-worker/src apps/encode-worker/src
+COPY apps/encode-worker/test/browser-rendition-media.test-support.ts apps/encode-worker/test/browser-rendition-media.test-support.ts
 COPY apps/operator-cli/src apps/operator-cli/src
 COPY apps/web apps/web
 RUN pnpm --filter @rip-dvd/web build
