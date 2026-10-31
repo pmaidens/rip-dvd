@@ -5755,10 +5755,12 @@ async function analyzeDvdImageLayout({
           offset = blockEnd;
           continue;
         }
-        if (offset + 38 > blockEnd) {
+        // FIDs may span logical blocks (ECMA TR/71 section 3.4). Only
+        // zero padding is block-bounded; descriptors use the directory stream.
+        if (offset + 38 > directory.byteLength) {
           throw new Error("DVD UDF directory entry is truncated");
         }
-        const remainingDirectoryBlock = directory.subarray(offset, blockEnd);
+        const remainingDirectory = directory.subarray(offset);
         while (
           dataExtents[containingExtentIndex] !== undefined &&
           offset >=
@@ -5784,9 +5786,9 @@ async function analyzeDvdImageLayout({
         if (expectedTagLocation === undefined) {
           throw new Error("DVD UDF directory entry location is invalid");
         }
-        const fileCharacteristics = remainingDirectoryBlock[18]!;
-        const fileIdentifierLength = remainingDirectoryBlock[19]!;
-        const implementationUseLength = remainingDirectoryBlock.readUInt16LE(
+        const fileCharacteristics = remainingDirectory[18]!;
+        const fileIdentifierLength = remainingDirectory[19]!;
+        const implementationUseLength = remainingDirectory.readUInt16LE(
           36,
         );
         const recordLength = Math.ceil(
@@ -5797,14 +5799,14 @@ async function analyzeDvdImageLayout({
           fileIdentifierLength;
         if (
           policy.requireCompleteFilesystemProfile &&
-            remainingDirectoryBlock.readUInt16LE(16) !== 1 ||
+            remainingDirectory.readUInt16LE(16) !== 1 ||
           (fileCharacteristics & ~0x0e) !== 0 ||
           (fileCharacteristics & 0x04) !== 0 ||
-          remainingDirectoryBlock.subarray(30, 36).some((byte) => byte !== 0) ||
+          remainingDirectory.subarray(30, 36).some((byte) => byte !== 0) ||
           implementationUseLength !== 0 ||
           recordLength <= 0 ||
-          entryEnd > blockEnd ||
-          16 + remainingDirectoryBlock.readUInt16LE(10) > recordLength ||
+          entryEnd > directory.byteLength ||
+          16 + remainingDirectory.readUInt16LE(10) > recordLength ||
           directory.subarray(offset + identifierEnd, entryEnd).some((byte) =>
             byte !== 0
           )
