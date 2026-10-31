@@ -2416,6 +2416,44 @@ p.verification-result {
   border-bottom: 1px solid #203b34;
 }
 
+.section-accordion > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.section-accordion > summary::-webkit-details-marker {
+  display: none;
+}
+
+.section-accordion > summary::after {
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-left: 1rem;
+  border-right: 2px solid #6f8f85;
+  border-bottom: 2px solid #6f8f85;
+  content: "";
+  transform: rotate(-45deg);
+  transition: transform 140ms ease;
+}
+
+.section-accordion[open] > summary::after {
+  transform: rotate(45deg);
+}
+
+.section-accordion:not([open]) > summary {
+  border-bottom: 0;
+}
+
+.section-accordion > summary:hover {
+  background: rgba(27, 52, 46, 0.35);
+}
+
+.section-accordion > summary:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: -3px;
+}
+
 .section-eyebrow {
   margin-bottom: 0.45rem;
   color: #6f8f85;
