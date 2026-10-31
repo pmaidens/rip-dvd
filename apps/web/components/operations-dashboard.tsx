@@ -106,6 +106,7 @@ interface SectionProps<T> {
   emptyMessage: string;
   renderItem: (item: T) => React.ReactNode;
   className?: string;
+  collapsible?: boolean;
 }
 
 function formatTimestamp(value: string): string {
@@ -990,6 +991,7 @@ function DashboardSection<T>({
   emptyMessage,
   renderItem,
   className = "",
+  collapsible = false,
 }: SectionProps<T>) {
   let content: React.ReactNode;
   let sectionState: "loading" | "error" | "empty" | "populated";
@@ -1019,18 +1021,29 @@ function DashboardSection<T>({
     }
   }
 
+  const heading = (
+    <div>
+      <p className="section-eyebrow">{eyebrow}</p>
+      <h2>{title}</h2>
+    </div>
+  );
+
   return (
     <section
       className={`dashboard-section ${className}`.trim()}
       data-state={sectionState}
     >
-      <header className="section-header">
-        <div>
-          <p className="section-eyebrow">{eyebrow}</p>
-          <h2>{title}</h2>
-        </div>
-      </header>
-      {content}
+      {collapsible ? (
+        <details className="section-accordion">
+          <summary className="section-header">{heading}</summary>
+          {content}
+        </details>
+      ) : (
+        <>
+          <header className="section-header">{heading}</header>
+          {content}
+        </>
+      )}
     </section>
   );
 }
@@ -1674,6 +1687,7 @@ export function DashboardView({
             title="Worker Incidents"
             eyebrow="Worker health"
             className="wide-section"
+            collapsible
             state={workerIncidentState}
             emptyMessage="No Worker Incidents are recorded."
             renderItem={(incident) => (
