@@ -160,7 +160,9 @@ remain unchanged.
 Each Settings section loads and retries independently. Encoding retains Current
 jobs and Queue new jobs with their in-page worklist behavior; its Manage Encoding
 Profiles shortcut opens Settings. Returning to Encoding reloads active profile
-choices for new jobs without changing the versions captured by existing jobs.
+choices for new jobs, including a browser-cached Back navigation, without
+changing the versions captured by existing jobs. Cached-page refresh and
+retained worklist coverage is in `apps/web/components/encoding-page-tabs.test.tsx`.
 
 Archive Job publication, ordinary and classified failure, and expired-claim failure
 atomically queue notifications at persistence. These producers add no operator

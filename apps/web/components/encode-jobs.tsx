@@ -1462,9 +1462,17 @@ export function EncodeJobsManager({
   ]);
 
   useEffect(() => {
-    setState({ status: "loading" });
-    void load();
+    const reload = () => {
+      setState({ status: "loading" });
+      void load();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) reload();
+    };
+    reload();
+    window.addEventListener("pageshow", onPageShow);
     return () => {
+      window.removeEventListener("pageshow", onPageShow);
       loadVersion.current += 1;
     };
   }, [load]);

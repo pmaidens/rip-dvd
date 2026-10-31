@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ launchOptions: {
+  ignoreDefaultArgs: ["--disable-back-forward-cache"],
+  args: ["--host-resolver-rules=MAP rip-dvd.test 127.0.0.1", "--no-proxy-server"],
+} });
+
 test("opens Settings from primary navigation with addressable configuration sections", async ({ page }) => {
   await page.goto("/encoding");
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
