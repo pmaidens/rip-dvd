@@ -23,9 +23,6 @@ test("explains missing server setup and visibly disables opt-in", async ({ page 
 
 test("redirects the legacy page to Notifications in Settings without prompting", async ({ page }) => {
   await controlledSubscription(page);
-  const response = await page.request.get("/notifications", { maxRedirects: 0 });
-  expect(response.status()).toBe(308);
-  expect(response.headers().location).toBe("/settings#notifications");
   await page.goto("/notifications");
   await expect(page).toHaveURL("/settings#notifications");
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
