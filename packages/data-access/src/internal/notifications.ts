@@ -14,6 +14,13 @@ export type NotificationTransaction = Parameters<Parameters<Database["transactio
 const pending = () => inArray(deliveries.status, ["queued", "retrying"]);
 const payloadDigest = (payload: NotificationEventInput["payload"]) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 
+/** Only the Settings destination changed; every other committed test fact must still match. */
+function isLegacyTestReplay(previousInput: string, currentInput: string): boolean {
+  const previous = JSON.parse(previousInput) as NotificationEventInput;
+  if (previous.payload.destination !== "/notifications") return false;
+  return JSON.stringify({ ...previous, payload: { ...previous.payload, destination: "/settings#notifications" } }) === currentInput;
+}
+
 /** Uses the caller's transaction. Never commits or performs network I/O. */
 export function createNotificationEventWriter(
   transaction: NotificationTransaction,
@@ -68,7 +75,10 @@ export function createNotificationAccess(database: Database, now: () => Date): N
       const semanticInput = JSON.stringify(input);
       const previous = transaction.select().from(mutationInvocations).where(eq(mutationInvocations.key, key)).get();
       if (previous) {
-        if (previous.operation !== operation || previous.semanticInput !== semanticInput) throw new MutationKeyConflictError();
+        if (previous.operation !== operation) throw new MutationKeyConflictError();
+        const matchesInput = previous.semanticInput === semanticInput ||
+          operation === "notification_test" && isLegacyTestReplay(previous.semanticInput, semanticInput);
+        if (!matchesInput) throw new MutationKeyConflictError();
         return JSON.parse(previous.outcome, (field, value: unknown) =>
           (field === "createdAt" || field === "updatedAt") && typeof value === "string" ? new Date(value) : value) as T;
       }

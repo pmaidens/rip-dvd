@@ -85,7 +85,7 @@ and compare both adapters with the same application rule.
 | Archive Job saved/failure notifications from any submitting client, outcome navigation, labeled detail and safe missing-target fallback | `/notifications/target`, `GET apps/web/app/api/operations/route.ts` | `rip-dvd inspect` archive-jobs and original-disc-archives | `apps/web/test/browser/notifications.e2e.ts`, `apps/operator-cli/src/archive-job-notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/archive-worker/src/archive-worker.test.ts` |
 | Confirmed Recovery Stop notifications after source commands, writer ownership and checkpoint reconciliation settle, with current remaining-source wording, replay/restart deduplication, distinct later stop identities, and safe navigation to current Recovery status, checkpoint, source counts and action availability | `POST apps/web/app/api/archive-recoveries/[id]/stop/route.ts`, `/notifications/target`, `GET apps/web/app/api/notifications/route.ts` | `rip-dvd archive-recovery stop`, `rip-dvd inspect archive-recoveries`, `rip-dvd notifications deliveries` | `apps/web/app/api/archive-recoveries/[id]/stop-notifications.test.ts`, `apps/web/app/api/archive-recoveries/[id]/recovery-worker.test.ts`, `apps/web/app/api/archive-recoveries/[id]/stop/route.test.ts`, `apps/web/test/browser/notifications.e2e.ts` |
 | Later Archive Recovery completion and committed attention notifications, including storage-fault pauses, with current recovery status, reasons and remaining-source facts at the labeled archive destination | `/notifications/target`, `GET apps/web/app/api/operations/route.ts`, `GET apps/web/app/api/notifications/route.ts` | `rip-dvd inspect` archive-recoveries and original-disc-archives, `rip-dvd notifications deliveries` | `apps/web/app/api/archive-recoveries/[id]/recovery-worker.test.ts` public CLI workflow and HTTP parity, `apps/archive-worker/src/dvd-initial-save.test.ts` initial-completion suppression, `apps/web/test/browser/notifications.e2e.ts` click navigation |
-| Browser notification configuration in Settings, visible unavailable and busy opt-in feedback, explicit opt-in and retained opt-out, subscription administration preserved through navigation and worker updates, queued tests, and retained queued/retrying/accepted/expired/failed delivery inspection with redacted reasons, attempt counts, retry timing and expiry; legacy page redirect and operational target backlinks | `apps/web/app/api/notifications/route.ts`, `/settings#notifications`, `/notifications` redirect, `/notifications/target` | `rip-dvd notifications` status, subscriptions, register, remove, test, deliveries; browser permission feedback is browser-only | `apps/operator-cli/src/notifications.test.ts`, `apps/operator-cli/src/archive-job-notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/web/components/notification-settings.test.tsx`, `apps/web/test/browser/settings.e2e.ts`, `apps/web/test/browser/notifications.e2e.ts`, `apps/web/test/browser/notification-insecure.e2e.ts`, `apps/web/test/browser/notification-updates.e2e.ts` |
+| Browser notification configuration in Settings, visible unavailable and busy opt-in feedback, explicit opt-in and retained opt-out, subscription administration preserved through navigation and worker updates, newly queued tests and safe worker fallback linking directly to Notifications in Settings, legacy payload and committed-request replay compatibility, and retained queued/retrying/accepted/expired/failed delivery inspection with redacted reasons, attempt counts, retry timing and expiry; legacy page redirect and operational target backlinks | `apps/web/app/api/notifications/route.ts`, `/settings#notifications`, `/notifications` redirect, `/notifications/target` | `rip-dvd notifications` status, subscriptions, register, remove, test, deliveries; browser permission feedback is browser-only | `apps/operator-cli/src/notifications.test.ts`, `apps/operator-cli/src/archive-job-notifications.test.ts`, `apps/web/app/api/notifications/route.test.ts`, `apps/web/components/notification-settings.test.tsx`, `apps/web/test/browser/settings.e2e.ts`, `apps/web/test/browser/notifications.e2e.ts`, `apps/web/test/browser/notification-insecure.e2e.ts`, `apps/web/test/browser/notification-updates.e2e.ts` |
 <!-- capability-inventory:end -->
 
 ## Enforced web adapter boundaries
@@ -176,9 +176,18 @@ Notification worker update checks, activation and subscription continuity are
 browser-only lifecycle behavior, covered by `notification-updates.e2e.ts` on the
 separate secure origin. They add no server mutation or CLI command. Existing
 `rip-dvd notifications` subscription, test and delivery operations remain the
-shared administration contract through upgrades. CLI workflows use real SQLite
-persistence in `apps/operator-cli/src/notifications.test.ts`; focused HTTP parity
-remains in `apps/web/app/api/notifications/route.test.ts`.
+shared administration contract through upgrades. Newly queued test payloads
+from both adapters use `/settings#notifications`. Current worker fallback uses
+that destination, accepts legacy `/notifications` links and reuses application
+windows. Older workers and already delivered legacy links remain usable through
+the redirect. CLI workflows use real SQLite persistence in
+`apps/operator-cli/src/notifications.test.ts`, including replay of tests queued
+before the destination update; focused HTTP parity in
+`apps/web/app/api/notifications/route.test.ts` verifies the dispatched destination.
+Canonical, legacy and unsafe click destinations and opted-out worker upgrades
+are covered by the secure `notifications.e2e.ts` and
+`notification-updates.e2e.ts` workflows. Insecure-origin coverage remains in
+`notification-insecure.e2e.ts`.
 
 The marked DVD initial-copy boundary operation evaluates normal endpoint proof
 and the bounded `dvd-full-extent-metadata-v1` decision before supplying publication

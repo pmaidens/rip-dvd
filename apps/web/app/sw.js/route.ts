@@ -2,13 +2,14 @@
 const script = `
 self.addEventListener("install", event => { event.waitUntil(self.skipWaiting()); });
 self.addEventListener("activate", event => { event.waitUntil(self.clients.claim()); });
+const defaultDestination = "/settings#notifications";
 function destination(value) {
   try {
-    const url = new URL(typeof value === "string" ? value : "/notifications", self.location.origin);
+    const url = new URL(typeof value === "string" ? value : defaultDestination, self.location.origin);
     if (url.origin === self.location.origin && !url.username && !url.password &&
-        ["/", "/notifications", "/notifications/target", "/catalog", "/discs"].includes(url.pathname)) return url.href;
+        ["/", "/settings", "/notifications", "/notifications/target", "/catalog", "/discs"].includes(url.pathname)) return url.href;
   } catch {}
-  return new URL("/notifications", self.location.origin).href;
+  return new URL(defaultDestination, self.location.origin).href;
 }
 self.addEventListener("push", event => {
   event.waitUntil((async () => {

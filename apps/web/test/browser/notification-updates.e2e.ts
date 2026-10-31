@@ -19,6 +19,16 @@ async function activeWorker(page: Page): Promise<Worker> {
   return page.context().serviceWorkers().find((worker) => worker.url().endsWith("/sw.js"))!;
 }
 
+async function subscriptionState(page: Page) {
+  return page.evaluate(async () => {
+    const registration = (await navigator.serviceWorker.getRegistration("/"))!;
+    return { subscription: (await registration.pushManager.getSubscription())?.toJSON() ?? null,
+      id: localStorage.getItem("rip-dvd.notifications.subscription"),
+      preference: localStorage.getItem("rip-dvd.notifications.preference"),
+      scope: registration.scope, cache: registration.updateViaCache };
+  });
+}
+
 test.afterEach(() => { rmSync(override, { force: true }); });
 
 test("upgrades an open app without replacing its subscription or reloading, and keeps v1 push and clicks working", async ({ page, context }) => {
@@ -41,17 +51,18 @@ test("upgrades an open app without replacing its subscription or reloading, and 
   });
   await session.send("ServiceWorker.enable");
   await expect.poll(() => registrations.size).toBe(1);
-  const payload = JSON.stringify({ version: 1, title: "Synthetic compatible test", body: "Synthetic outcome", tag: "synthetic-update-test", destination: "https://outside.example/" });
+  const payload = JSON.stringify({ version: 1, title: "Synthetic compatible test", body: "Synthetic outcome", tag: "synthetic-update-test", destination: "/settings#notifications" });
   await deliverPush(old, payload);
+  await expect.poll(() => old.evaluate(async () => (await self.registration.getNotifications()).find((item) => item.tag === "synthetic-update-test")?.data.destination))
+    .toBe("http://localhost:3101/notifications");
   await clickNotification(old, "synthetic-update-test");
   await expect(page).toHaveURL(/\/settings#notifications$/);
   await expect(page.getByRole("button", { name: "Disable notifications", exact: true })).toBeEnabled();
-  const before = await page.evaluate(async () => {
-    const registration = (await navigator.serviceWorker.getRegistration("/"))!;
-    (window as unknown as { pageLifetime: string }).pageLifetime = "synthetic-open-page";
-    return { subscription: (await registration.pushManager.getSubscription())!.toJSON(),
-      id: localStorage.getItem("rip-dvd.notifications.subscription"), scope: registration.scope, cache: registration.updateViaCache };
-  });
+  // Keep an already-displayed legacy notification across activation of the new worker.
+  await deliverPush(old, JSON.stringify({ version: 1, title: "Synthetic legacy test", body: "Before activation",
+    tag: "synthetic-legacy-update", destination: "/notifications" }));
+  await page.evaluate(() => { (window as unknown as { pageLifetime: string }).pageLifetime = "synthetic-open-page"; });
+  const before = await subscriptionState(page);
   expect(before.cache).toBe("none");
   const count = requestCount();
   writeFileSync(override, deployedWorker + '\nself.addEventListener("activate", () => { self.syntheticRevision = "new"; });');
@@ -64,37 +75,49 @@ test("upgrades an open app without replacing its subscription or reloading, and 
   const worker = await updated;
   await expect.poll(() => worker.evaluate(() => (self as unknown as { syntheticRevision?: string }).syntheticRevision)).toBe("new");
   await expect.poll(() => page.evaluate(() => (window as unknown as { pageLifetime: string }).pageLifetime)).toBe("synthetic-open-page");
-  expect(await page.evaluate(async () => {
-    const registration = (await navigator.serviceWorker.getRegistration("/"))!;
-    return { subscription: (await registration.pushManager.getSubscription())!.toJSON(),
-      id: localStorage.getItem("rip-dvd.notifications.subscription"), scope: registration.scope, cache: registration.updateViaCache };
-  })).toEqual(before);
+  expect(await subscriptionState(page)).toEqual(before);
   expect(registrations.size).toBe(1);
   expect(await page.evaluate(() => localStorage.getItem("synthetic-permission-prompts"))).toBe("1");
   await deliverPush(worker, payload);
   await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.title))).toContain("Synthetic compatible test");
+  await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).find((item) => item.tag === "synthetic-update-test")?.data.destination))
+    .toBe("http://localhost:3101/settings#notifications");
   await page.getByRole("button", { name: "Send test notification" }).click();
   await expect(page.getByRole("status")).toContainText("Queued for delivery");
   const queued = dispatchQueuedPushes();
   expect(queued.length).toBeGreaterThan(0);
-  for (const payload of queued) await deliverPush(worker, JSON.stringify(payload));
+  for (const payload of queued) {
+    expect(payload).toMatchObject({ destination: "/settings#notifications" });
+    await deliverPush(worker, JSON.stringify(payload));
+  }
   await expect.poll(() => worker.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.title))).toContain("Rip DVD test");
   await clickNotification(worker, "synthetic-update-test");
   await expect(page).toHaveURL(/\/settings#notifications$/);
   expect(context.pages()).toHaveLength(1);
+  await page.goto("/catalog");
+  await clickNotification(worker, "synthetic-legacy-update");
+  await expect(page).toHaveURL("/settings#notifications");
+  expect(context.pages()).toHaveLength(1);
+  expect(await subscriptionState(page)).toEqual(before);
+  expect(await page.evaluate(() => localStorage.getItem("synthetic-permission-prompts"))).toBe("1");
 });
 
 for (const failure of [
   { name: "malformed script", script: "self.addEventListener(\"install\", ;", error: true },
   { name: "rejected installation", script: 'self.addEventListener("install", event => { event.waitUntil(Promise.reject(new Error("Synthetic rejected installation"))); });', error: false },
-]) {
-  test(`keeps the known-good worker and subscription controls usable after a ${failure.name}`, async ({ page, context }) => {
+].flatMap((failure) => [ { ...failure, optedOut: false }, { ...failure, optedOut: true } ])) {
+  test(`preserves ${failure.optedOut ? "opt-out" : "the enabled subscription"} after a ${failure.name} and corrected activation`, async ({ page, context }) => {
     await controlledSubscription(page);
     await page.clock.install();
     await page.goto("/settings#notifications");
     await page.getByRole("button", { name: "Enable notifications", exact: true }).click();
     await expect(page.getByRole("status")).toHaveText("Notifications enabled on this browser.");
     const knownGood = await activeWorker(page);
+    if (failure.optedOut) {
+      await page.getByRole("button", { name: "Disable notifications", exact: true }).click();
+      await expect(page.getByRole("status")).toHaveText("Notifications disabled on this browser.");
+    }
+    const before = await subscriptionState(page);
     const session = await context.newCDPSession(page);
     const errors: string[] = [];
     const redundant = new Set<string>();
@@ -109,16 +132,18 @@ for (const failure of [
     await foreground(page);
     await expect.poll(() => failure.error ? errors.length : redundant.size).toBeGreaterThan(0);
     expect(await page.evaluate(() => (window as unknown as { pageLifetime: string }).pageLifetime)).toBe("synthetic-surviving-page");
+    expect(await subscriptionState(page)).toEqual(before);
     await deliverPush(knownGood, JSON.stringify({ version: 1, title: "Synthetic retained worker", body: "Still usable", tag: "synthetic-retained", destination: "/notifications" }));
     await expect.poll(() => knownGood.evaluate(async () => (await self.registration.getNotifications()).map((item) => item.title))).toContain("Synthetic retained worker");
     await page.getByRole("button", { name: "Check notification status" }).click();
     await expect(page.getByRole("status")).toHaveText("Notification status refreshed.");
-    await page.getByRole("button", { name: "Send test notification" }).click();
-    await expect(page.getByRole("status")).toContainText("Queued for delivery");
-    await page.getByRole("button", { name: "Disable notifications", exact: true }).click();
-    await expect(page.getByRole("status")).toHaveText("Notifications disabled on this browser.");
-    await page.getByRole("button", { name: "Enable notifications", exact: true }).click();
-    await expect(page.getByRole("status")).toHaveText("Notifications enabled on this browser.");
+    if (failure.optedOut) {
+      await expect(page.getByRole("button", { name: "Send test notification" })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "Enable notifications", exact: true })).toBeEnabled();
+    } else {
+      await page.getByRole("button", { name: "Send test notification" }).click();
+      await expect(page.getByRole("status")).toContainText("Queued for delivery");
+    }
     // A corrected deployment can still replace the retained worker later.
     rmSync(override);
     const corrected = await (await page.request.get("/sw.js")).text();
@@ -128,5 +153,10 @@ for (const failure of [
     await foreground(page);
     const worker = await updated;
     await expect.poll(() => worker.evaluate(() => (self as unknown as { syntheticRevision?: string }).syntheticRevision)).toBe("corrected");
+    expect(await subscriptionState(page)).toEqual(before);
+    await page.reload();
+    await expect(page.getByRole("button", { name: failure.optedOut ? "Enable notifications" : "Disable notifications", exact: true })).toBeEnabled();
+    expect(await subscriptionState(page)).toEqual(before);
+    expect(await page.evaluate(() => localStorage.getItem("synthetic-permission-prompts"))).toBe("1");
   });
 }

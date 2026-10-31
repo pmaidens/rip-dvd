@@ -7,9 +7,10 @@ after refresh and with browser Back and Forward. Opening Settings or following
 a section link never requests permission or enables an opted-out browser.
 Existing subscriptions and saved opt-out choices continue to apply.
 
-The legacy `/notifications` page redirects to `/settings#notifications`, so
-bookmarks, queued test notifications and older worker fallbacks still reach
-the controls. Operational links under `/notifications/target` retain their
+New test notifications from Settings and the JSON CLI open
+`/settings#notifications` directly. The legacy `/notifications` page redirects
+there, so bookmarks, queued test notifications and older worker fallbacks still
+reach the controls. Operational links under `/notifications/target` retain their
 Archive Job or Original Disc Archive details and query parameters. Their
 Notification settings link opens the new Settings section.
 
@@ -200,10 +201,14 @@ new worker during deployments and while accepted pushes remain in flight. New
 optional fields must not change existing meanings. An incompatible payload
 version requires a separate compatibility plan before a producer starts using
 it. Missing labels use a generic fallback; malformed or unsupported payloads
-show a generic notification. Unsafe destinations fall back to `/notifications`.
+show a generic notification. The current worker accepts `/settings#notifications`
+and uses it for missing or unsafe destinations. It continues accepting legacy
+`/notifications` links. A previous worker receiving a new Settings destination
+uses its legacy fallback, which redirects to the same section.
 Clicks validate destinations again, reuse a same-origin app window when possible,
-and otherwise open one. The test-notification command retains the same payload
-and delivery workflow throughout upgrades.
+and otherwise open one. Already queued and displayed payloads retain their
+original destinations, and replaying a test request committed before the update
+returns its original result without queuing another delivery.
 
 Browsers control network checks and worker execution. Offline, suspended or
 sleeping clients may keep an earlier worker until the browser next runs a
@@ -225,4 +230,8 @@ changes the served worker bytes. A frozen version 1 fixture verifies compatibili
 with the previous worker. The browser performs installation and activation;
 subscription/provider behavior uses the same controlled boundary as test push.
 The tests inspect registration identity, subscription data, page lifetime, actual
-notification display and click navigation, including rejected updates.
+notification display and click navigation for canonical, legacy and unsafe
+destinations, including rejected updates and retained opt-out choices. Worker
+checks and activation are browser-only behavior. The shared notification
+operations and JSON CLI commands continue to administer subscriptions and
+deliveries independently of the browser worker lifecycle.

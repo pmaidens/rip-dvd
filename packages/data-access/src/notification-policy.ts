@@ -31,7 +31,7 @@ export function formatNotification(outcome: NotificationOutcome): NotificationEv
       ? "Archive Recovery stopped. Source remains unrecovered."
       : "Archive Recovery stopped. No source remains unrecovered."; break;
   }
-  const destination = outcome.kind === "test" ? "/notifications"
+  const destination = outcome.kind === "test" ? "/settings#notifications"
     : "archiveJobId" in outcome
       ? `/notifications/target?kind=archive-jobs&id=${encodeURIComponent(outcome.archiveJobId)}`
       : `/notifications/target?kind=original-disc-archives&id=${encodeURIComponent(outcome.originalDiscArchiveId)}`;
