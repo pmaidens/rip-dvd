@@ -50,7 +50,6 @@ import {
   EncodeJobsManager,
   retryEncodeJob,
 } from "./encode-jobs";
-import { EncodingProfilesManager } from "./encoding-profiles";
 import { FilesystemVerificationInventory } from "./filesystem-verification-inventory";
 import {
   FilesystemVerificationResult,
@@ -2473,7 +2472,7 @@ export type OperationsDashboardPage =
   | "encoding"
   | "verification";
 
-export type EncodingPageTab = "current" | "queue" | "settings";
+export type EncodingPageTab = "current" | "queue";
 export type EncodeJobFilter = "in_progress" | "completed";
 
 const encodingPageTabs: ReadonlyArray<{
@@ -2482,7 +2481,6 @@ const encodingPageTabs: ReadonlyArray<{
 }> = [
   { id: "current", label: "Current jobs" },
   { id: "queue", label: "Queue new jobs" },
-  { id: "settings", label: "Settings" },
 ];
 
 function encodeJobFilterForStatus(
@@ -2547,7 +2545,7 @@ const pageCopy: Record<
     kicker: "Encoding",
     title: "Manage the path to the media library.",
     summary:
-      "Maintain encoding profiles, queue reviewed selections, and follow each encode through publication.",
+      "Queue reviewed selections and follow each Encode Job through publication. Manage Encoding Profiles in Settings.",
   },
   verification: {
     kicker: "Filesystem verification",
@@ -2861,6 +2859,7 @@ export function OperationsDashboard({
 
       {page === "encoding" ? (
         <section className="encoding-workspace" aria-label="Encoding workspace">
+          <p><a href="/settings#encoding-profiles">Manage Encoding Profiles</a></p>
           <div
             className="encoding-page-tabs"
             role="tablist"
@@ -2941,17 +2940,6 @@ export function OperationsDashboard({
             <EncodingReadinessPanel revision={requestNumber} />
             <EncodeJobsManager
               revision={requestNumber}
-              onChanged={() => setRequestNumber((value) => value + 1)}
-            />
-          </div>
-
-          <div
-            id="encoding-panel-settings"
-            role="tabpanel"
-            aria-labelledby="encoding-tab-settings"
-            hidden={encodingTab !== "settings"}
-          >
-            <EncodingProfilesManager
               onChanged={() => setRequestNumber((value) => value + 1)}
             />
           </div>

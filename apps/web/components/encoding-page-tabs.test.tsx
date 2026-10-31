@@ -717,13 +717,14 @@ describe("encoding page tabs", () => {
       expect(tabs.map((tab) => tab.textContent)).toEqual([
         "Current jobs",
         "Queue new jobs",
-        "Settings",
       ]);
       expect(tabs.map((tab) => tab.getAttribute("aria-controls"))).toEqual([
         "encoding-panel-current",
         "encoding-panel-queue",
-        "encoding-panel-settings",
       ]);
+      expect(container.querySelector('a[href="/settings#encoding-profiles"]')?.textContent)
+        .toBe("Manage Encoding Profiles");
+      expect(container.querySelector('input[name="key"]')).toBeNull();
       expect(tabs[0]?.getAttribute("aria-selected")).toBe("true");
       expect(container.textContent).toContain("queued title");
       expect(container.querySelector("#encoding-panel-current")?.textContent)
@@ -777,11 +778,17 @@ describe("encoding page tabs", () => {
       expect(container.querySelector(".encode-worklist-table")?.textContent)
         .toContain("Keep this worklist row");
 
-      await act(async () => tabs[2]?.click());
+      await act(async () => {
+        tabs[1]?.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+        }));
+      });
+      expect(tabs[0]?.getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(tabs[0]);
       expect(container.querySelector("#encoding-panel-queue")?.hasAttribute(
         "hidden",
       )).toBe(true);
-      await act(async () => tabs[0]?.click());
       await act(async () => tabs[1]?.click());
 
       expect(container.querySelector(".encode-worklist-table")?.textContent)
