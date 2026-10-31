@@ -1345,6 +1345,75 @@ function relocateSyntheticUdfRootDirectory(
   writeUdfSectorTag(image, 301, 261, 1);
 }
 
+function writePackedSyntheticUdfRootDirectory(
+  image: Buffer,
+  childOffset: number,
+) {
+  const records = [udfFileIdentifier({
+    childLba: 1,
+    fileCharacteristics: 0x0a,
+  })];
+  let offset = records[0]!.byteLength;
+  let fillerIndex = 0;
+  while (offset < childOffset) {
+    const remaining = childOffset - offset;
+    let recordLength = Math.min(292, remaining);
+    if (remaining > recordLength && remaining - recordLength < 40) {
+      recordLength -= 40;
+    }
+    if (recordLength < 40 || recordLength % 4 !== 0) {
+      throw new Error("invalid synthetic directory offset");
+    }
+    const fileEntryLba = 450 + fillerIndex;
+    records.push(udfFileIdentifier({
+      childLba: fileEntryLba - 300,
+      fileCharacteristics: 0,
+      name: String(fillerIndex).padEnd(recordLength - 39, "X"),
+    }));
+    writeUdfFileEntry(image, {
+      allocationByteCount: 0,
+      dataLba: 0,
+      fileEntryLba,
+      fileType: 5,
+      informationLength: 0,
+    });
+    offset += recordLength;
+    fillerIndex += 1;
+  }
+  const child = udfFileIdentifier({
+    childLba: 3,
+    fileCharacteristics: 2,
+    name: "VIDEO_TS",
+  });
+  records.push(child, udfFileIdentifier({
+    childLba: 170,
+    fileCharacteristics: 0,
+    name: "TAIL",
+  }));
+  writeUdfFileEntry(image, {
+    allocationByteCount: 0,
+    dataLba: 0,
+    fileEntryLba: 470,
+    fileType: 5,
+    informationLength: 0,
+  });
+  const informationLength = writeUdfDirectory(image, 500, records);
+  writeUdfFileEntry(image, {
+    allocationByteCount: 2 * DVD_SECTOR_SIZE_BYTES,
+    dataLba: 200,
+    fileEntryLba: 301,
+    fileType: 4,
+    informationLength,
+  });
+  return {
+    childByteCount: child.byteLength,
+    directory: image.subarray(
+      500 * DVD_SECTOR_SIZE_BYTES,
+      500 * DVD_SECTOR_SIZE_BYTES + informationLength,
+    ),
+  };
+}
+
 function writeFixture(image: Buffer, badLba?: number) {
   if (badLba !== undefined) {
     image.fill(
@@ -2840,7 +2909,7 @@ describe("retained DVD image layout completeness", () => {
     })).resolves.toEqual({ maximumReferencedLba: 599 });
   });
 
-  it("rejects a UDF directory entry that crosses a logical-block boundary", async () => {
+  it("rejects nonzero UDF directory padding before a logical-block boundary", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
       includeUdf: true,
@@ -2852,6 +2921,168 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF directory padding is malformed");
+  });
+
+  it.each([4, 16, 40, 48])(
+    "accepts a packed UDF FID starting %i bytes before a logical-block boundary",
+    async (bytesBeforeBoundary) => {
+      const image = syntheticCompleteDvdImage({
+        includeIso: false,
+        includeUdf: true,
+      });
+      writePackedSyntheticUdfRootDirectory(
+        image,
+        DVD_SECTOR_SIZE_BYTES - bytesBeforeBoundary,
+      );
+      const fixture = writeFixture(image);
+
+      await expect(proveDvdImageLayoutCompleteness({
+        candidateBoundaryLba: 600,
+        imagePath: fixture.imagePath,
+      })).resolves.toEqual({ maximumReferencedLba: 599 });
+    },
+  );
+
+  it.each([DVD_SECTOR_SIZE_BYTES, DVD_SECTOR_SIZE_BYTES + 28])(
+    "accepts a spanning UDF FID across noncontiguous allocations split at byte %i",
+    async (splitOffset) => {
+      const image = syntheticCompleteDvdImage({
+        includeIso: false,
+        includeUdf: true,
+      });
+      const childOffset = DVD_SECTOR_SIZE_BYTES - 4;
+      const { childByteCount, directory } = writePackedSyntheticUdfRootDirectory(
+        image,
+        childOffset,
+      );
+      // The spanning FID starts in logical block 200. The next FID starts
+      // in the second allocation, whose physical location is unrelated.
+      writeUdfTag(directory.subarray(childOffset + childByteCount), 257, 230);
+      directory.copy(image, 530 * DVD_SECTOR_SIZE_BYTES, splitOffset);
+      image.fill(
+        0,
+        500 * DVD_SECTOR_SIZE_BYTES + splitOffset,
+        502 * DVD_SECTOR_SIZE_BYTES,
+      );
+      const rootFileEntry = image.subarray(
+        301 * DVD_SECTOR_SIZE_BYTES,
+        302 * DVD_SECTOR_SIZE_BYTES,
+      );
+      const secondExtentLength = 2 * DVD_SECTOR_SIZE_BYTES - splitOffset;
+      rootFileEntry.writeBigUInt64LE(BigInt(
+        Math.ceil(splitOffset / DVD_SECTOR_SIZE_BYTES) +
+          Math.ceil(secondExtentLength / DVD_SECTOR_SIZE_BYTES),
+      ), 64);
+      rootFileEntry.writeUInt32LE(16, 172);
+      rootFileEntry.writeUInt32LE(splitOffset, 176);
+      rootFileEntry.writeUInt32LE(secondExtentLength, 184);
+      rootFileEntry.writeUInt32LE(230, 188);
+      writeUdfTag(rootFileEntry, 261, 1);
+      const fixture = writeFixture(image);
+
+      await expect(proveDvdImageLayoutCompleteness({
+        candidateBoundaryLba: 600,
+        imagePath: fixture.imagePath,
+      })).resolves.toEqual({ maximumReferencedLba: 599 });
+    },
+  );
+
+  it.each([
+    [12, "DVD UDF directory entry is truncated"],
+    [36, "DVD UDF directory entry is truncated"],
+    [40, "DVD UDF directory entry length is invalid"],
+    [47, "DVD UDF directory entry length is invalid"],
+  ])("rejects a spanning UDF FID with only %i declared directory bytes remaining", async (
+    retainedBytes,
+    expectedError,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const childOffset = DVD_SECTOR_SIZE_BYTES - 4;
+    writePackedSyntheticUdfRootDirectory(image, childOffset);
+    // The rest of the FID is present on disk, but outside Information Length.
+    image.writeBigUInt64LE(
+      BigInt(childOffset + retainedBytes),
+      301 * DVD_SECTOR_SIZE_BYTES + 56,
+    );
+    writeUdfSectorTag(image, 301, 261, 1);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(expectedError);
+  });
+
+  it("rejects a spanning UDF FID whose continuation is outside the directory allocation", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    writePackedSyntheticUdfRootDirectory(image, DVD_SECTOR_SIZE_BYTES - 4);
+    image.writeBigUInt64LE(1n, 301 * DVD_SECTOR_SIZE_BYTES + 64);
+    image.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 301 * DVD_SECTOR_SIZE_BYTES + 176);
+    writeUdfSectorTag(image, 301, 261, 1);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF file layout is incomplete");
+  });
+
+  it.each([
+    ["tag checksum", "DVD UDF descriptor tag checksum is invalid"],
+    ["body CRC", "DVD UDF descriptor CRC is invalid"],
+    ["starting tag location", "DVD UDF descriptor tag location is invalid"],
+    ["following tag location", "DVD UDF descriptor tag location is invalid"],
+    ["oversized CRC", "DVD UDF directory entry length is invalid"],
+    ["short CRC", "DVD UDF descriptor CRC length is invalid"],
+    ["record padding", "DVD UDF directory entry length is invalid"],
+    ["identifier length", "DVD UDF directory entry length is invalid"],
+  ])("rejects a spanning UDF FID with invalid %s", async (
+    corruption,
+    expectedError,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const childOffset = DVD_SECTOR_SIZE_BYTES - 4;
+    const { childByteCount, directory } = writePackedSyntheticUdfRootDirectory(
+      image,
+      childOffset,
+    );
+    const child = directory.subarray(childOffset, childOffset + childByteCount);
+    if (corruption === "tag checksum") {
+      child[4] = child[4]! ^ 1;
+    } else if (corruption === "body CRC") {
+      child[40] = child[40]! ^ 1;
+    } else if (corruption === "starting tag location") {
+      writeUdfTag(child, 257, 201);
+    } else if (corruption === "following tag location") {
+      writeUdfTag(directory.subarray(childOffset + childByteCount), 257, 200);
+    } else if (corruption === "oversized CRC") {
+      writeUdfTag(directory.subarray(childOffset), 257, 200, {
+        crcLength: childByteCount - 12,
+      });
+    } else if (corruption === "short CRC") {
+      writeUdfTag(child, 257, 200, { crcLength: childByteCount - 20 });
+    } else if (corruption === "record padding") {
+      child[childByteCount - 1] = 1;
+      writeUdfTag(child, 257, 200);
+    } else if (corruption === "identifier length") {
+      child[19] = 255;
+      writeUdfTag(child, 257, 200);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(expectedError);
   });
 
   it("rejects a UDF directory-entry CRC that crosses its record boundary", async () => {
@@ -5048,6 +5279,28 @@ describe("DVD layout damage classification", () => {
       affectedTitleBadSectorCounts: [],
       outcome: "accepted",
     });
+  });
+
+  it.each([
+    [550, { affectedTitleBadSectorCounts: [], outcome: "accepted" }],
+    [338, { outcome: "rejected", reason: "menu" }],
+    [501, { outcome: "rejected", reason: "directory_data" }],
+  ] as const)("preserves salvage policy with a spanning UDF FID and damage at LBA %i", async (
+    badLba,
+    expectedResult,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    writePackedSyntheticUdfRootDirectory(image, DVD_SECTOR_SIZE_BYTES - 4);
+    const fixture = writeFixture(image, badLba);
+
+    await expect(classifyDvdImageDamage({
+      expectedByteCount: fixture.sizeBytes,
+      imagePath: fixture.imagePath,
+      unreadableSectorRanges: [{ startLba: badLba, sectorCount: 1 }],
+    })).resolves.toEqual(expectedResult);
   });
 
   it(
