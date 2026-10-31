@@ -1,6 +1,7 @@
 import json
 import pathlib
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -386,6 +387,54 @@ class ComposeDeploymentTests(unittest.TestCase):
             web_builder.index("RUN pnpm --filter @rip-dvd/web build"),
         )
         self.assertNotIn("apps/archive-worker", web_runtime)
+
+    def test_web_builder_includes_cross_app_imports_before_typechecking(self) -> None:
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+        builder_inputs = dockerfile_stage(dockerfile, "web-builder").split(
+            "RUN pnpm --filter @rip-dvd/web build", 1
+        )[0]
+        copies = []
+        for line in builder_inputs.splitlines():
+            if not line.startswith("COPY "):
+                continue
+            parts = shlex.split(line)
+            if not parts[1].startswith("--"):
+                copies.extend((ROOT / source, ROOT / parts[-1]) for source in parts[1:-1])
+
+        web = ROOT / "apps" / "web"
+        dependencies = set()
+        for source in web.rglob("*"):
+            if source.suffix not in (".ts", ".tsx") or any(
+                part in {"node_modules", ".next"} for part in source.relative_to(web).parts
+            ):
+                continue
+            for specifier in re.findall(
+                r'''(?:\bfrom\s+|\bimport\s*\()\s*["']([^"']+)["']''',
+                source.read_text(),
+            ):
+                if not specifier.startswith("."):
+                    continue
+                imported = (source.parent / specifier).resolve()
+                if not imported.is_relative_to(ROOT / "apps") or imported.is_relative_to(web):
+                    continue
+                candidates = [imported, pathlib.Path(f"{imported}.ts"), pathlib.Path(f"{imported}.tsx")]
+                if imported.suffix == ".js":
+                    candidates.extend([imported.with_suffix(".ts"), imported.with_suffix(".tsx")])
+                dependency = next((path for path in candidates if path.is_file()), None)
+                self.assertIsNotNone(dependency, specifier)
+                dependencies.add(dependency)
+
+        for dependency in sorted(dependencies):
+            available = any(
+                (source.is_dir() and dependency.is_relative_to(source)
+                 and destination / dependency.relative_to(source) == dependency)
+                or (source == dependency and destination == dependency)
+                for source, destination in copies
+            )
+            self.assertTrue(
+                available,
+                f"{dependency.relative_to(ROOT)} is unavailable before the web build",
+            )
 
     def test_start_resolves_local_hardware_before_migration(self) -> None:
         start_script = (ROOT / "scripts" / "compose-start.sh").read_text()
