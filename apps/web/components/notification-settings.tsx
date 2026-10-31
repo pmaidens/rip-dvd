@@ -27,8 +27,8 @@ export function NotificationSettings() {
     try { await action(); } catch (error) { setMessage(error instanceof Error ? error.message : "Notification operation failed."); }
     finally { setBusy(false); setProblem(browserNotificationProblem()); }
   }
-  return <main className="notification-settings">
-    <h1>Notifications</h1>
+  return <section id="notifications" aria-labelledby="notifications-heading">
+    <h2 id="notifications-heading">Notifications</h2>
     <p>On iPhone, open this app in Safari, choose Share, then Add to Home Screen. Open that Home Screen app and tap Enable notifications.</p>
     <p>No permission prompt appears until you tap Enable notifications. Each active browser receives installation events, including work started through the CLI.</p>
     {problem && <p role="note">{problem}</p>}
@@ -54,7 +54,7 @@ export function NotificationSettings() {
       })}>Check notification status</button>
     </div>
     <p>Disabling prevents later dispatch. An already accepted push cannot be recalled. Push is best effort; provider acceptance does not guarantee device display.</p>
-    <h2>Recent deliveries</h2>
+    <h3>Recent deliveries</h3>
     <p>The latest 25 delivery records are retained for seven days after completion. Temporary failures retry up to eight attempts within 24 hours.</p>
     {deliveries.length === 0 ? <p>No retained deliveries.</p> : <ul aria-label="Recent notification deliveries">{deliveries.map((delivery) => <li key={delivery.id}>
       {delivery.status === "accepted" ? "Accepted by the push service. Device display is not confirmed." : delivery.status === "retrying" ? "Retrying" : delivery.status === "expired" ? "Expired" : delivery.status === "failed" ? "Failed" : "Queued"}
@@ -63,5 +63,5 @@ export function NotificationSettings() {
       {delivery.nextAttemptAt && ` · Next attempt: ${new Date(delivery.nextAttemptAt).toLocaleString()}`}
       {` · Expires: ${new Date(delivery.expiresAt).toLocaleString()}`}
     </li>)}</ul>}
-  </main>;
+  </section>;
 }
