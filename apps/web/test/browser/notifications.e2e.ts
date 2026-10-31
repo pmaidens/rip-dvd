@@ -4,6 +4,22 @@ declare const self: ServiceWorkerGlobalScope;
 import { expect, test } from "@playwright/test";
 import { clickNotification, completeControlledRecoveryStop, controlledSubscription, deliverPush, dispatchQueuedPushes, recoveryNotificationPayload } from "./notification-test-support";
 
+test("explains missing server setup and visibly disables opt-in", async ({ page }) => {
+  await controlledSubscription(page);
+  await page.route("**/api/notifications?action=status", (route) => route.fulfill({ json: {
+    configured: false, reason: "missing_configuration", publicKey: null, dispatcherAvailable: false,
+  } }));
+  await page.route("**/api/notifications?action=deliveries&limit=25", (route) => route.fulfill({ json: { deliveries: [] } }));
+  await page.goto("/notifications");
+  const button = page.getByRole("button", { name: "Enable notifications", exact: true });
+  await expect(button).toBeDisabled();
+  await expect(button).toHaveCSS("opacity", "0.5");
+  await expect(page.getByRole("status")).toHaveText("Notifications cannot be enabled until server setup is complete.");
+  await page.getByRole("button", { name: "Check notification status" }).click();
+  await expect(page.getByRole("status")).toHaveText("Notifications cannot be enabled until server setup is complete.");
+  expect(await page.evaluate(() => localStorage.getItem("synthetic-permission-prompts"))).toBeNull();
+});
+
 test("installs metadata and opts in, displays the queued test, navigates, and opts out without reopening permission", async ({ page, context }) => {
   await context.grantPermissions(["notifications"], { origin: "http://localhost:3101" });
   await controlledSubscription(page);

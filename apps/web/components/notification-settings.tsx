@@ -16,7 +16,9 @@ export function NotificationSettings() {
     let cancelled = false;
     setProblem(browserNotificationProblem());
     void Promise.all([readPushReadiness(), reconcileBrowserPush(), readNotificationDeliveries()]).then(([status, enabled, recent]) => {
-      if (!cancelled) { setReadiness(status); setActive(enabled); setDeliveries(recent); setMessage(enabled ? "Notifications enabled on this browser." : "Notifications disabled on this browser."); }
+      if (!cancelled) { setReadiness(status); setActive(enabled); setDeliveries(recent); setMessage(!status.configured
+        ? "Notifications cannot be enabled until server setup is complete."
+        : enabled ? "Notifications enabled on this browser." : "Notifications disabled on this browser."); }
     }).catch(() => { if (!cancelled) setMessage("Notification service is unavailable. Try checking status again."); });
     return () => { cancelled = true; };
   }, []);
@@ -38,14 +40,17 @@ export function NotificationSettings() {
     <p role="status" aria-live="polite">{message}</p>
     <div className="notification-controls">
       <button disabled={busy || active || !!problem || !readiness?.publicKey} onClick={() => void run(async () => {
+        setMessage("Enabling notifications. Respond to the permission prompt if one appears.");
         setActive(await enableBrowserPush(readiness!.publicKey!)); setMessage("Notifications enabled on this browser.");
       })}>Enable notifications</button>
       <button disabled={busy || !active} onClick={() => void run(async () => { await disableBrowserPush(); setActive(false); setMessage("Notifications disabled on this browser."); })}>Disable notifications</button>
       <button disabled={busy || !active || !readiness?.configured} onClick={() => void run(async () => { setEventId(await submitBrowserTest()); setMessage("Queued for delivery. Provider acceptance does not prove device display."); })}>Send test notification</button>
       <button disabled={busy} onClick={() => void run(async () => {
-        setReadiness(await readPushReadiness()); setActive(await reconcileBrowserPush());
+        const status = await readPushReadiness();
+        setReadiness(status); setActive(await reconcileBrowserPush());
         setDeliveries(await readNotificationDeliveries());
-        setMessage(eventId ? await readBrowserTestDelivery(eventId) : "Notification status refreshed.");
+        setMessage(!status.configured ? "Notifications cannot be enabled until server setup is complete."
+          : eventId ? await readBrowserTestDelivery(eventId) : "Notification status refreshed.");
       })}>Check notification status</button>
     </div>
     <p>Disabling prevents later dispatch. An already accepted push cannot be recalled. Push is best effort; provider acceptance does not guarantee device display.</p>
