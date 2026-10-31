@@ -3806,6 +3806,7 @@ h3 {
 
 .notification-settings { max-width: 54rem; margin: 2rem auto; padding: 0 1rem; }
 .notification-controls { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-block: 1rem; }
+.notification-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .encoding-readiness {
   min-width: 0;
