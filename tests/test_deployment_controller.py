@@ -151,9 +151,17 @@ case "$*" in
     [ "${GIT_ANCESTRY_FAIL:-0}" != 1 ]
     ;;
   'log --format=%H%x09%s --no-merges __OLD__..__TARGET__')
-    printf '__TARGET__\tFixture deployment commit\n'
+    if [ -n "${GIT_LOG_FILE:-}" ]; then
+      cat "$GIT_LOG_FILE"
+    else
+      printf '__TARGET__\tFixture deployment commit\n'
+    fi
     ;;
   'diff --name-status -z __OLD__..__TARGET__')
+    if [ -n "${GIT_FILES_FILE:-}" ]; then
+      cat "$GIT_FILES_FILE"
+      exit
+    fi
     case "${GIT_CHANGE_KIND:-source}" in
       source) printf 'M\000apps/web/app/page.tsx\000' ;;
       risky) printf 'M\000scripts/update.sh\000' ;;
@@ -170,7 +178,13 @@ case "$*" in
         ;;
     esac
     ;;
-  diff\ --no-ext-diff*) printf '%s' "${GIT_REVIEW_DIFF:-}" ;;
+  diff\ --no-ext-diff*)
+    if [ -n "${GIT_REVIEW_DIFF_FILE:-}" ]; then
+      cat "$GIT_REVIEW_DIFF_FILE"
+    else
+      printf '%s' "${GIT_REVIEW_DIFF:-}"
+    fi
+    ;;
   'rev-parse --git-path rip-dvd-update.lock') printf '%s\n' "$RIP_DVD_DEPLOY_STATE_DIR/update.lock" ;;
   'symbolic-ref --quiet --short HEAD') printf 'main\n' ;;
   'cat-file -e __TARGET__^{commit}') exit 0 ;;
@@ -466,6 +480,35 @@ class DeploymentControllerTests(unittest.TestCase):
         self.assertEqual(payload["state"], "review_required")
         self.assertIn("deployment_or_recovery", payload["details"]["reasons"])
         self.assertIn("review_bundle_limit_exceeded", payload["details"]["reasons"])
+
+    def test_large_git_review_output_requires_review_without_buffer_failure(self) -> None:
+        cases = {
+            "GIT_REVIEW_DIFF_FILE": "+synthetic source change\n" * 150_000,
+            "GIT_LOG_FILE": f"{TARGET_COMMIT}\tSynthetic change\n" * 50_000,
+            "GIT_FILES_FILE": "M\0apps/web/synthetic.ts\0" * 150_000,
+        }
+        for variable, output in cases.items():
+            with self.subTest(variable=variable):
+                fixture = self.harness.root / "large-git-output"
+                fixture.write_text(output)
+                self.assertGreater(fixture.stat().st_size, 2 * 1024 * 1024)
+
+                planned = self.plan({variable: str(fixture)})
+
+                self.assertEqual(planned.returncode, 21, planned.stdout + planned.stderr)
+                payload = self.harness.result(planned)
+                self.assertEqual(payload["state"], "review_required")
+                self.assertIn("git_inventory_incomplete", payload["details"]["reasons"])
+                bundle = self.harness.state / "review-bundle.json"
+                self.assertLessEqual(bundle.stat().st_size, 48 * 1024)
+                self.assertTrue(json.loads(bundle.read_text())["reviewRequired"])
+                self.assertNotIn("ENOBUFS", planned.stdout + planned.stderr)
+
+                blocked = self.harness.run("apply", "--target", TARGET_COMMIT)
+
+                self.assertEqual(self.harness.result(blocked)["state"], "review_required")
+                self.assertFalse(self.harness.head.exists())
+                self.assertFalse(self.harness.runtime_stopped.exists())
 
     def test_plan_blocks_active_disc_work_before_checkout_changes(self) -> None:
         readiness = {

@@ -104,6 +104,50 @@ export function runCheckedSync(executable, arguments_, options = {}) {
   return { status: 0, stdout, stderr, stdoutTruncated, stderrTruncated };
 }
 
+export async function runChecked(executable, arguments_, options = {}) {
+  const child = spawn(executable, arguments_, {
+    cwd: options.cwd ?? REPOSITORY_ROOT,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  // Drain both streams to completion, retaining only their leading bytes.
+  // Exceeding the review budget must require review, not kill Git.
+  const capture = (stream) => {
+    const buffer = Buffer.alloc(MAX_COMMAND_BYTES);
+    let length = 0;
+    let truncated = false;
+    stream.on("data", (chunk) => {
+      const retained = Math.min(chunk.length, buffer.length - length);
+      chunk.copy(buffer, length, 0, retained);
+      length += retained;
+      if (retained < chunk.length) truncated = true;
+    });
+    return {
+      text: () => buffer.subarray(0, length).toString("utf8"),
+      truncated: () => truncated,
+    };
+  };
+  const stdoutCapture = capture(child.stdout);
+  const stderrCapture = capture(child.stderr);
+  let failure;
+  child.on("error", (error) => { failure = error; });
+  const status = await new Promise((resolveStatus) => child.on("close", resolveStatus));
+  const stdoutTruncated = stdoutCapture.truncated();
+  const stderrTruncated = stderrCapture.truncated();
+  const stdout = stdoutCapture.text();
+  // A cut-off credential or private-key block cannot be safely sanitized.
+  const stderr = stderrTruncated
+    ? "[stderr exceeded capture limit; output omitted]"
+    : sanitizeText(stderrCapture.text());
+  if (failure || status !== 0) {
+    if (!options.allowFailure) {
+      const reason = failure?.message ?? (stderr.trim() || `exit ${status}`);
+      throw new Error(`${executable} failed: ${reason}`);
+    }
+  }
+  return { status: status ?? 1, stdout, stderr, stdoutTruncated, stderrTruncated };
+}
+
 export function runStreaming(executable, arguments_, options) {
   return new Promise((resolvePromise) => {
     const child = spawn(executable, arguments_, {

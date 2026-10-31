@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import { classifyReview, sanitizeText } from "./deploy.mjs";
 import { buildReviewBundle } from "./deploy-review.mjs";
 import { acquireLock, emitResult } from "./deploy-state.mjs";
-import { createStreamSanitizer, runCheckedSync, runStreaming } from "./deploy-support.mjs";
+import { MAX_COMMAND_BYTES, createStreamSanitizer, runChecked, runCheckedSync, runStreaming } from "./deploy-support.mjs";
 
 describe("deployment review classifier", () => {
   it("requires review for migrations and schema changes without migrations", () => {
@@ -152,6 +152,49 @@ describe("deployment review classifier", () => {
       bundle.relevantDiff,
       /correct horse|battery staple|quoted secret|secret with spaces/u,
     );
+  });
+});
+
+describe("bounded deployment command capture", () => {
+  it("drains oversized stdout and stderr without exceeding the capture budget", async () => {
+    const result = await runChecked(process.execPath, ["-e", `
+      process.stdout.write('x'.repeat(3 * ${MAX_COMMAND_BYTES}));
+      process.stderr.write('secret'.repeat(${MAX_COMMAND_BYTES}));
+    `]);
+
+    assert.equal(result.status, 0);
+    assert.equal(Buffer.byteLength(result.stdout), MAX_COMMAND_BYTES);
+    assert.equal(result.stdoutTruncated, true);
+    assert.equal(result.stderrTruncated, true);
+    assert.doesNotMatch(result.stderr, /secret/u);
+  });
+
+  it("preserves output at the exact capture limit without marking it incomplete", async () => {
+    const result = await runChecked(process.execPath, [
+      "-e", `process.stdout.write('x'.repeat(${MAX_COMMAND_BYTES}))`,
+    ]);
+
+    assert.equal(result.stdout.length, MAX_COMMAND_BYTES);
+    assert.equal(result.stdoutTruncated, false);
+    assert.equal(result.stderrTruncated, false);
+  });
+
+  it("keeps command failures and sanitized diagnostics after oversized output", async () => {
+    const args = ["-e", `
+      process.stdout.write('x'.repeat(3 * ${MAX_COMMAND_BYTES}));
+      process.stderr.write('password: synthetic secret\\n');
+      process.exitCode = 7;
+    `];
+
+    await assert.rejects(runChecked(process.execPath, args), /password: \[REDACTED\]/u);
+    const result = await runChecked(process.execPath, args, { allowFailure: true });
+    assert.equal(result.status, 7);
+    assert.equal(result.stdoutTruncated, true);
+    assert.doesNotMatch(result.stderr, /synthetic secret/u);
+  });
+
+  it("rejects spawn failures", async () => {
+    await assert.rejects(runChecked("missing-synthetic-deploy-command", []), /ENOENT/u);
   });
 });
 
