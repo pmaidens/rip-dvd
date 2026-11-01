@@ -1125,6 +1125,11 @@ describe("encode worker polling", () => {
     language?: string;
     foreignAudioSearch?: boolean;
     reusedSearch?: boolean;
+    noForcedHits?: boolean;
+    namedSources?: boolean;
+    textSubtitle?: boolean;
+    logFault?: "duplicate" | "malformed";
+    wrongTitle?: boolean;
     missingProvenance?: boolean;
     emptyForeignAudioSearch?: boolean;
     emptyCount?: number;
@@ -1144,6 +1149,14 @@ describe("encode worker polling", () => {
     { name: "legacy count-only metadata", legacy: true, chapters: false },
     { name: "a chapter range", legacy: false, chapters: true },
     { name: "a foreign-audio-search result", foreignAudioSearch: true },
+    { name: "complete reuse with no forced hits", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true },
+    { name: "reordered named sources and intervening text", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, namedSources: true, textSubtitle: true },
+    { name: "incorrect reused title", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, namedSources: true, wrongTitle: true, expectedFailure: "has title Wrong, expected title" },
+    { name: "missing complete source after filter sanitization", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, outputCount: 1, expectedFailure: "expected 2 VobSub output streams, found 1" },
+    { name: "duplicate source after filter sanitization", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, logFault: "duplicate", expectedFailure: "HandBrake subtitle provenance is incomplete or invalid" },
+    { name: "malformed sanitized selection", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, logFault: "malformed", expectedFailure: "HandBrake subtitle provenance is incomplete or invalid" },
+    { name: "empty reused source with no forced hits", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, emptyForeignAudioSearch: true },
+    { name: "empty source beside complete no-forced-hits reuse", foreignAudioSearch: true, reusedSearch: true, noForcedHits: true, emptyCount: 1 },
     { name: "a preserved source reused by foreign-audio search", foreignAudioSearch: true, reusedSearch: true },
     { name: "an empty source beside a populated reused search track", foreignAudioSearch: true, reusedSearch: true, emptyCount: 1 },
     { name: "an empty reused search track beside a populated source", foreignAudioSearch: true, reusedSearch: true, emptyForeignAudioSearch: true },
@@ -1156,7 +1169,7 @@ describe("encode worker polling", () => {
     { name: "incorrect language metadata", language: "fra", expectedFailure: "has language fra, expected eng" },
   ])("validates DVD display variants with $name and one stored declaration", async ({
     legacy, chapters, outputCount = 2, language = "eng",
-    foreignAudioSearch = false, reusedSearch = false, missingProvenance = false, emptyForeignAudioSearch = false, emptyCount = 0, scanCount = 2, expectedFailure,
+    foreignAudioSearch = false, reusedSearch = false, noForcedHits = false, namedSources = false, textSubtitle = false, logFault, wrongTitle = false, missingProvenance = false, emptyForeignAudioSearch = false, emptyCount = 0, scanCount = 2, expectedFailure,
   }) => {
     const fixture = createQueuedJob(chapters
       ? { kind: "dvd_chapters", titleNumber: 4, chapterStart: 3, chapterEnd: 5 }
@@ -1174,6 +1187,10 @@ describe("encode worker polling", () => {
     const storedScan = fixture.access.catalog.listDetectedDiscs()[0]!.scanData;
     const scan = structuredClone(dvdVariants);
     scan.TitleList[0]!.SubtitleList = scan.TitleList[0]!.SubtitleList.slice(0, scanCount);
+    if (namedSources) {
+      Object.assign(scan.TitleList[0]!.SubtitleList[0]!, { Name: "Synthetic main" });
+      Object.assign(scan.TitleList[0]!.SubtitleList[1]!, { Name: "Synthetic commentary" });
+    }
     const scanCommand = vi.fn(async () => ({ stdout: `JSON Title Set: ${JSON.stringify(scan)}\n` }));
     const removedIndexes = new Set<number>();
     const outputValidator = createNodeEncodeOutputValidator({
@@ -1191,11 +1208,12 @@ describe("encode worker polling", () => {
             streams: [
               ...(foreignAudioSearch && !removedIndexes.has(2) ? [{
                 index: 2, codec_name: "dvd_subtitle", nb_read_packets: emptyForeignAudioSearch ? undefined : "1",
-                disposition: { default: 1, forced: 1 }, tags: { language: "eng" },
+                disposition: { default: 1, forced: 1 }, tags: { language: "eng", ...(namedSources ? { title: wrongTitle ? "Wrong" : "Synthetic commentary" } : {}) },
               }] : []),
+              ...(textSubtitle ? [{ index: 3, codec_name: "subrip", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } }] : []),
               ...Array.from({ length: outputCount - Number(reusedSearch) }, (_, index) => ({
-                index: index + 3, codec_name: "dvd_subtitle", nb_read_packets: index < emptyCount ? undefined : "10",
-                disposition: { default: 0, forced: 0 }, tags: { language },
+                index: index + 3 + Number(textSubtitle), codec_name: "dvd_subtitle", nb_read_packets: index < emptyCount ? undefined : "10",
+                disposition: { default: 0, forced: 0 }, tags: { language, ...(namedSources ? { title: "Synthetic main" } : {}) },
               })).filter((stream) => !removedIndexes.has(stream.index)),
             ],
           } : {
@@ -1209,7 +1227,11 @@ describe("encode worker polling", () => {
       ...fixture, concurrency: 1, log: vi.fn(), outputValidator,
       subtitleScanner: createNodeDvdSubtitleScanner({ runCommand: scanCommand }),
       runner: { run: async ({ outputPath, onStderr }) => {
-        if (!missingProvenance) onStderr?.(subtitleLog({ sourceCount: scanCount, search: foreignAudioSearch, reused: reusedSearch }));
+        let log = subtitleLog({ sourceCount: scanCount, search: foreignAudioSearch, reused: reusedSearch, noForcedHits });
+        if (textSubtitle) log = log.replace("* subtitle track 2", "* subtitle track 2, English (track 0, id 0x100, Text) -> Passthru\n[00:00:03]  * subtitle track 3");
+        if (logFault === "duplicate") log = log.replace("(track 0,", "(track 1,");
+        if (logFault === "malformed") log = log.replace("-> Passthru", "-> Unknown");
+        if (!missingProvenance) onStderr?.(log);
         writeFileSync(outputPath, "two subtitle variants");
       } },
       signal: new AbortController().signal,

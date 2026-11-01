@@ -105,6 +105,42 @@ function createMediaToolRunner({
 }
 
 describe("encode output validation", () => {
+  it.each([
+    { defaultTrack: true, forcedOnly: false, noForcedHits: true, reused: true },
+    { defaultTrack: false, forcedOnly: false, noForcedHits: true, reused: true },
+    { defaultTrack: true, forcedOnly: true, noForcedHits: false, reused: true },
+    { defaultTrack: false, forcedOnly: true, noForcedHits: false, reused: true },
+    { defaultTrack: true, forcedOnly: true, noForcedHits: false, reused: false },
+    { defaultTrack: false, forcedOnly: true, noForcedHits: false, reused: false },
+  ])("validates sanitized search selections $defaultTrack/$forcedOnly, reused=$reused", async (selection) => {
+    const expectedVobSubStreams = [
+      { languageCode: "eng", sourceTrackNumber: 1, title: null },
+      { languageCode: "eng", sourceTrackNumber: 2, title: null },
+    ];
+    const parser = createHandBrakeSubtitleProvenanceParser();
+    parser.push(subtitleLog({ search: true, ...selection }));
+    const provenance = parser.finish(expectedVobSubStreams);
+    expect(provenance[0]).toMatchObject({ forcedOnly: selection.forcedOnly,
+      kind: selection.reused ? "source" : "foreign_audio_search" });
+    const streams = [
+      { index: 2, codec_name: "dvd_subtitle", disposition: { default: Number(selection.defaultTrack), forced: Number(selection.defaultTrack) }, tags: { language: "eng" } },
+      { index: 3, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } },
+      ...(!selection.reused ? [{ index: 4, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng" } }] : []),
+    ];
+    const validator = createNodeEncodeOutputValidator({ runMediaTool: createMediaToolRunner({ subtitleStreams: streams }) });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal, {
+      expectedVobSubStreams, vobSubProvenance: provenance,
+    })).resolves.toMatchObject({ decode: { completed: true } });
+    for (const flag of ["default", "forced"] as const) {
+      const incorrect = structuredClone(streams);
+      incorrect[0]!.disposition[flag] = Number(!selection.defaultTrack);
+      await expect(createNodeEncodeOutputValidator({ runMediaTool: createMediaToolRunner({ subtitleStreams: incorrect }) })
+        .prepareAndValidate("/media/synthetic.mkv", new AbortController().signal, {
+          expectedVobSubStreams, vobSubProvenance: provenance,
+        })).rejects.toThrow("disposition inconsistent");
+    }
+  });
+
   it.each(["EIO", "ENOSPC", "EDQUOT", "EROFS", "ESTALE"])("does not make a %s probe storage fault retainable", async (code) => {
     const validator = createNodeEncodeOutputValidator({ runMediaTool: async () => {
       throw Object.assign(new Error("Synthetic media storage failure"), { code });
@@ -208,8 +244,8 @@ describe("encode output validation", () => {
         { languageCode: "eng", sourceTrackNumber: 2 },
       ],
       vobSubProvenance: [
-        { sourceTrackNumber: 2, kind: "foreign_audio_search", default: true, forced: true },
-        { sourceTrackNumber: 1, kind: "source", default: false, forced: false },
+        { sourceTrackNumber: 2, kind: "foreign_audio_search", default: true, forcedOnly: true },
+        { sourceTrackNumber: 1, kind: "source", default: false, forcedOnly: false },
       ],
     })).rejects.toThrow("expected 2 source VobSub streams, found 1");
   });
@@ -221,7 +257,7 @@ describe("encode output validation", () => {
     ];
     const originalExpectations = structuredClone(expectedVobSubStreams);
     const parser = createHandBrakeSubtitleProvenanceParser();
-    parser.push(subtitleLog({ search: true, reused: true }));
+    parser.push(subtitleLog({ search: true, noForcedHits: true }));
     let cleaned = false;
     const repairer = { removeEmptyVobSubStreams: vi.fn(async () => { cleaned = true; }) };
     const validator = createNodeEncodeOutputValidator({
@@ -255,6 +291,41 @@ describe("encode output validation", () => {
       retainedSubtitleDispositions: [{ default: true, forced: true }],
     }));
     expect(expectedVobSubStreams).toEqual(originalExpectations);
+  });
+
+  it.each(["derived", "complete"] as const)("filters original mappings when the empty %s search stream is removed", async (empty) => {
+    const expectedVobSubStreams = [
+      { sourceTrackNumber: 1, languageCode: "fra", title: "Main" },
+      { sourceTrackNumber: 2, languageCode: "eng", title: "Commentary" },
+    ];
+    const parser = createHandBrakeSubtitleProvenanceParser();
+    parser.push(subtitleLog({ search: true, defaultTrack: false }));
+    const provenance = parser.finish(expectedVobSubStreams);
+    const original = [
+      { index: 6, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng", title: "Commentary" } },
+      { index: 8, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "fra", title: "Main" } },
+      { index: 9, codec_name: "dvd_subtitle", disposition: { default: 0, forced: 0 }, tags: { language: "eng", title: "Commentary" } },
+    ];
+    const emptyIndex = empty === "derived" ? 6 : 9;
+    let cleaned = false;
+    const repairer = { removeEmptyVobSubStreams: vi.fn(async () => { cleaned = true; }) };
+    const validator = createNodeEncodeOutputValidator({ repairer, runMediaTool: (request) => {
+      const streams = cleaned ? original.filter((stream) => stream.index !== emptyIndex)
+        .map((stream, position) => ({ ...stream, index: position + 2 })) : original;
+      return createMediaToolRunner({ subtitleStreams: streams,
+        subtitlePacketStreams: streams.map((stream) => ({ ...stream, nb_read_packets: !cleaned && stream.index === emptyIndex ? "0" : "4" })),
+      })(request);
+    } });
+    await expect(validator.prepareAndValidate("/media/synthetic.mkv", new AbortController().signal, {
+      expectedVobSubStreams, vobSubProvenance: provenance,
+    })).resolves.toMatchObject({ decode: { completed: true } });
+    expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith(expect.objectContaining({
+      emptyStreamIndexes: [emptyIndex], retainedSubtitleDispositions: [
+        { default: false, forced: false }, { default: false, forced: false },
+      ],
+    }));
+    expect(expectedVobSubStreams).toHaveLength(2);
+    expect(provenance).toHaveLength(3);
   });
 
   it.each([

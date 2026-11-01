@@ -13,7 +13,7 @@ export interface HandBrakeVobSubProvenance {
   sourceTrackNumber: number;
   kind: "source" | "foreign_audio_search";
   default: boolean;
-  forced: boolean;
+  forcedOnly: boolean;
 }
 
 interface SubtitleSelection {
@@ -21,7 +21,7 @@ interface SubtitleSelection {
   id: string;
   picture: boolean;
   default: boolean;
-  forced: boolean;
+  forcedOnly: boolean;
 }
 
 interface SubtitleStatistics {
@@ -108,7 +108,7 @@ export function createHandBrakeSubtitleProvenanceParser() {
         sourceTrackNumber: Number(selection[2]) + 1,
         id: selection[3]!,
         picture: selection[4] === "Picture",
-        forced: selection[5] !== undefined,
+        forcedOnly: selection[5] !== undefined,
         default: selection[6] !== undefined,
       });
     }
@@ -129,12 +129,16 @@ export function createHandBrakeSubtitleProvenanceParser() {
         sourceNumbers.size !== expectations.length ||
         [...sourceNumbers].some((number) => !Number.isSafeInteger(number) || number! < 1)
       ) invalidProvenance();
+      // The Matroska muxer chooses the last default across picture and text.
+      // Multiple defaults are unsupported; do not infer flags from a subset.
+      if (selections.filter((selection) => selection.default).length > 1) invalidProvenance();
       const result: HandBrakeVobSubProvenance[] = [];
       let searchCount = 0;
-      for (const selection of selections.filter((selection) => selection.picture)) {
+      for (const [position, selection] of selections.entries()) {
+        if (!selection.picture) continue;
         if (!sourceNumbers.has(selection.sourceTrackNumber)) invalidProvenance();
         let kind: HandBrakeVobSubProvenance["kind"] = "source";
-        if (selection.default || selection.forced) {
+        if (selection.default || selection.forcedOnly || (position === 0 && selection.id === selectedId)) {
           const stats = statistics.get(selection.id);
           if (
             ++searchCount > 1 ||
@@ -142,9 +146,9 @@ export function createHandBrakeSubtitleProvenanceParser() {
             !stats ||
             stats.sourceTrackNumber !== selection.sourceTrackNumber ||
             stats.hits === 0 ||
-            (selection.forced && stats.forced === 0)
+            (selection.forcedOnly && stats.forced === 0)
           ) invalidProvenance();
-          if (selection.forced && stats.forced < stats.hits) {
+          if (selection.forcedOnly && stats.forced < stats.hits) {
             kind = "foreign_audio_search";
           }
         }
@@ -152,7 +156,7 @@ export function createHandBrakeSubtitleProvenanceParser() {
           sourceTrackNumber: selection.sourceTrackNumber,
           kind,
           default: selection.default,
-          forced: selection.forced,
+          forcedOnly: selection.forcedOnly,
         });
       }
       // A partial search result can never stand in for its complete source.
