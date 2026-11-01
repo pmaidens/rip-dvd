@@ -4,11 +4,15 @@ export function subtitleLog({
   search = false,
   reused = false,
   noForcedHits = false,
+  defaultTrack = true,
+  forcedOnly = !noForcedHits,
 }: {
   sourceCount?: number;
   search?: boolean;
   reused?: boolean;
   noForcedHits?: boolean;
+  defaultTrack?: boolean;
+  forcedOnly?: boolean;
 } = {}): string {
   const lines: string[] = [];
   if (search) {
@@ -23,7 +27,7 @@ export function subtitleLog({
   lines.push("[00:00:03] Starting Task: Encoding Pass", "[00:00:03] job configuration:");
   let output = 0;
   if (search) {
-    lines.push(`[00:00:03]  * subtitle track ${++output}, English (track 1, id 0x21bd, Picture) -> Passthru${noForcedHits ? "" : ", Forced Only"}, Default`);
+    lines.push(`[00:00:03]  * subtitle track ${++output}, English (track 1, id 0x21bd, Picture) -> Passthru${forcedOnly ? ", Forced Only" : ""}${defaultTrack ? ", Default" : ""}`);
   }
   for (let source = 1; source <= sourceCount; source++) {
     if (search && (reused || noForcedHits) && source === 2) continue;

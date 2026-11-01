@@ -17,15 +17,15 @@ function parse(log: string) {
 describe("HandBrake subtitle provenance", () => {
   it("maps zero-based log source numbers to the one-based JSON scan", () => {
     expect(parse(subtitleLog())).toEqual([
-      { sourceTrackNumber: 1, kind: "source", default: false, forced: false },
-      { sourceTrackNumber: 2, kind: "source", default: false, forced: false },
+      { sourceTrackNumber: 1, kind: "source", default: false, forcedOnly: false },
+      { sourceTrackNumber: 2, kind: "source", default: false, forcedOnly: false },
     ]);
   });
 
   it("counts the all-forced source selected by search exactly once in its new output position", () => {
     expect(parse(subtitleLog({ search: true, reused: true }))).toEqual([
-      { sourceTrackNumber: 2, kind: "source", default: true, forced: true },
-      { sourceTrackNumber: 1, kind: "source", default: false, forced: false },
+      { sourceTrackNumber: 2, kind: "source", default: true, forcedOnly: true },
+      { sourceTrackNumber: 1, kind: "source", default: false, forcedOnly: false },
     ]);
   });
 
@@ -38,21 +38,26 @@ describe("HandBrake subtitle provenance", () => {
       "[00:00:03]  * subtitle track 2, English (track 1, id 0x21bd, Picture) -> Passthru",
     ].join("\n"));
     expect(parser.finish([sources[1]!])).toEqual([
-      { sourceTrackNumber: 2, kind: "source", default: false, forced: false },
+      { sourceTrackNumber: 2, kind: "source", default: false, forcedOnly: false },
     ]);
+  });
+
+  it("accounts for a sole text default without marking picture sources as default", () => {
+    const log = subtitleLog().replace("* subtitle track 2", "* subtitle track 2, English (track 0, id 0x100, Text) -> Passthru, Default\n[00:00:03]  * subtitle track 3");
+    expect(parse(log)).toEqual(parse(subtitleLog()));
   });
 
   it("keeps a filtered search result separate from both complete sources", () => {
     expect(parse(subtitleLog({ search: true }))).toEqual([
-      { sourceTrackNumber: 2, kind: "foreign_audio_search", default: true, forced: true },
-      { sourceTrackNumber: 1, kind: "source", default: false, forced: false },
-      { sourceTrackNumber: 2, kind: "source", default: false, forced: false },
+      { sourceTrackNumber: 2, kind: "foreign_audio_search", default: true, forcedOnly: true },
+      { sourceTrackNumber: 1, kind: "source", default: false, forcedOnly: false },
+      { sourceTrackNumber: 2, kind: "source", default: false, forcedOnly: false },
     ]);
   });
 
   it("recognizes a complete reused source when search disables the forced-only filter", () => {
     expect(parse(subtitleLog({ search: true, noForcedHits: true }))[0]).toEqual(
-      { sourceTrackNumber: 2, kind: "source", default: true, forced: false },
+      { sourceTrackNumber: 2, kind: "source", default: true, forcedOnly: false },
     );
   });
 
@@ -76,6 +81,8 @@ describe("HandBrake subtitle provenance", () => {
 
   const reusedLog = subtitleLog({ search: true, reused: true });
   it.each([
+    ["multiple picture defaults", reusedLog.replace(/(track 0,.*Passthru)/, "$1, Default")],
+    ["an intervening text default alongside a picture default", reusedLog.replace("* subtitle track 2", "* subtitle track 2, English (track 0, id 0x100, Text) -> Passthru, Default\n[00:00:03]  * subtitle track 3")],
     ["absent output", ""],
     ["an analysis pass without an encoding pass", subtitleLog().replace("Encoding Pass", "Analysis Pass")],
     ["absent statistics", reusedLog.replace(/^.*40 hits.*\n/m, "")],

@@ -628,6 +628,10 @@ preserve their validation failure, file identity and immutable source claim when
 recorded. A changed file loses completeness and acknowledgement/export availability.
 The Encode Job stays failed and the normal library output stays in place.
 Inspection and export use the same commands for all three identity kinds.
+For retained validation failures, follow the
+[subtitle validation review procedure](../../docs/encode-output-subtitle-validation.md)
+to preserve an exact exported baseline, use a separate diagnostic working copy,
+and distinguish independent media checks from complete attempt-bound validation.
 Bounded lists set `encodeOutputArtifactsTruncated` when older generations are
 omitted. Page the complete history with
 `inspect encode-jobs <encode-job-id> --limit 1..100 --offset <n>`; each result

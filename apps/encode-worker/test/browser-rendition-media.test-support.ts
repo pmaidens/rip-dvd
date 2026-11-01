@@ -8,7 +8,7 @@ import { join } from "node:path";
 // Packet framing and RLE follow FFmpeg's supdec.c and pgssubdec.c:
 // https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/supdec.c
 // https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/pgssubdec.c
-function syntheticBitmapSubtitle() {
+export function syntheticBitmapSubtitle(cueCount = 1, spacingTicks = 270_000, durationTicks = 180_000) {
   const word = (value: number) => { const result = Buffer.alloc(2); result.writeUInt16BE(value); return result; };
   const packet = (pts: number, type: number, payload: Buffer) => {
     const header = Buffer.alloc(13); header.write("PG"); header.writeUInt32BE(pts, 2); header[10] = type; header.writeUInt16BE(payload.length, 11);
@@ -18,13 +18,16 @@ function syntheticBitmapSubtitle() {
     ...(visible ? [word(0), Buffer.from([0, 0]), word(40), word(64)] : [])]);
   const rle = Buffer.concat(Array.from({ length: 16 }, () => Buffer.concat([Buffer.alloc(80, 1), Buffer.from([0, 0])])));
   const length = Buffer.alloc(3); length.writeUIntBE(rle.length + 4, 0, 3);
-  return Buffer.concat([
-    packet(45_000, 0x16, presentation(true)),
-    packet(45_000, 0x17, Buffer.concat([Buffer.from([1, 0]), word(0), word(0), word(160), word(90)])),
-    packet(45_000, 0x14, Buffer.from([0, 0, 0, 16, 128, 128, 0, 1, 235, 128, 128, 255])),
-    packet(45_000, 0x15, Buffer.concat([word(0), Buffer.from([0, 0xc0]), length, word(80), word(16), rle])),
-    packet(45_000, 0x80, Buffer.alloc(0)), packet(225_000, 0x16, presentation(false)), packet(225_000, 0x80, Buffer.alloc(0)),
-  ]);
+  return Buffer.concat(Array.from({ length: cueCount }, (_, cue) => {
+    const start = 45_000 + cue * spacingTicks;
+    return Buffer.concat([
+      packet(start, 0x16, presentation(true)),
+      packet(start, 0x17, Buffer.concat([Buffer.from([1, 0]), word(0), word(0), word(160), word(90)])),
+      packet(start, 0x14, Buffer.from([0, 0, 0, 16, 128, 128, 0, 1, 235, 128, 128, 255])),
+      packet(start, 0x15, Buffer.concat([word(0), Buffer.from([0, 0xc0]), length, word(80), word(16), rle])),
+      packet(start, 0x80, Buffer.alloc(0)), packet(start + durationTicks, 0x16, presentation(false)), packet(start + durationTicks, 0x80, Buffer.alloc(0)),
+    ]);
+  }));
 }
 export type SyntheticViewingVariant = "compatible" | "incompatible" | "audio_conversion" | "video_format" | "subtitles";
 export function createSyntheticViewingSource(directory: string, variant: SyntheticViewingVariant, durationSeconds = 3) {

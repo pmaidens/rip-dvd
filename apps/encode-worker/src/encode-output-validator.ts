@@ -338,6 +338,9 @@ function sourceVobSubStreams(
         `expected ${provenance.length} VobSub output streams, found ${vobSubStreams.length}`,
       );
     }
+    if (provenance.filter((track) => track?.default).length > 1) {
+      throw validationError("subtitle_streams", "multiple default subtitles in HandBrake source provenance");
+    }
     const sourceStreams = new Map<number, CompleteSubtitleStream>();
     let searchCount = 0;
     for (const [position, track] of provenance.entries()) {
@@ -347,15 +350,17 @@ function sourceVobSubStreams(
       );
       if (
         !track || !expectation ||
-        typeof track.default !== "boolean" || typeof track.forced !== "boolean" ||
+        typeof track.default !== "boolean" || typeof track.forcedOnly !== "boolean" ||
         (track.kind !== "source" && track.kind !== "foreign_audio_search")
       ) {
         throw validationError("subtitle_streams", "subtitle source provenance is invalid");
       }
       const stream = vobSubStreams[position]!;
+      // HandBrake 1.9.2 Matroska muxavformat.c sets both flags from
+      // config.default_track. config.force only filters subtitle packets.
       if (
         stream.disposition.default !== Number(track.default) ||
-        stream.disposition.forced !== Number(track.forced)
+        stream.disposition.forced !== Number(track.default)
       ) {
         throw validationError(
           "subtitle_streams",
@@ -368,7 +373,7 @@ function sourceVobSubStreams(
         }
         sourceStreams.set(track.sourceTrackNumber, stream);
       } else {
-        if (++searchCount > 1 || !track.forced) {
+        if (++searchCount > 1 || !track.forcedOnly) {
           throw validationError("subtitle_streams", "foreign-audio-search VobSub provenance is invalid");
         }
         validateExpectedVobSubStreams([stream], [expectation]);
