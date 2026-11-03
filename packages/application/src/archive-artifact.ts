@@ -14,6 +14,7 @@ import {
 } from "@rip-dvd/worker-runtime";
 
 import { describeCatalogReviewWorkflow } from "./catalog-review-workflow.js";
+import { describeArchiveJobTiming, type ArchiveJobTiming } from "./archive-job-timing.js";
 import { inspectDvdDiscSourceIdentity } from "./dvd-disc-confirmation.js";
 import { presentArchiveRecoveryRangeEvidence } from "./archive-recovery-ranges.js";
 import { visibleArchiveRecovery } from "./archive-recovery-view.js";
@@ -55,7 +56,7 @@ export interface ArchiveArtifact {
   initialPreservation: {
     saved: boolean;
     archiveRequest: { id: string; status: string } | null;
-    archiveJob: { id: string; status: string } | null;
+    archiveJob: { id: string; status: string; timing: ArchiveJobTiming } | null;
   };
   recovery: {
     state: ArchiveArtifactRecoveryState;
@@ -406,7 +407,7 @@ export function describeArchiveArtifact(
         : { id: archiveRequest.id, status: archiveRequest.status },
       archiveJob: archiveJob === null
         ? null
-        : { id: archiveJob.id, status: archiveJob.status },
+        : { id: archiveJob.id, status: archiveJob.status, timing: describeArchiveJobTiming(archiveJob) },
     },
     recovery: {
       state: recoveryState,
