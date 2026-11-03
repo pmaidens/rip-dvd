@@ -1,6 +1,9 @@
 import { expect, vi } from "vitest";
-import { beginSettledDiscInspectionForTest } from "@rip-dvd/data-access/test-support";
-import { createOperatorWorkflowFixture } from "./operator-workflow.test-support.js";
+import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
+import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import { beginSettledDiscInspectionForTest, createNormalDvdArchiveBoundaryEvidenceForTest } from "@rip-dvd/data-access/test-support";
+import { createOperatorWorkflowFixture, markArchiveWithDvdRecoveryEvidence } from "./operator-workflow.test-support.js";
 
 export async function startTimingAttempt() {
   const fixture = createOperatorWorkflowFixture();
@@ -18,5 +21,34 @@ export async function startTimingAttempt() {
   settled.restoreSystemTime();
   const claim = access.archiveJobs.startForInspection(inspection.id, "synthetic-worker")!;
   return { fixture, access, claim };
+}
+
+export async function saveTimingArchive({ unavailable = false, recoveryCompleted = false }: {
+  unavailable?: boolean;
+  recoveryCompleted?: boolean;
+} = {}) {
+  const started = await startTimingAttempt();
+  const { fixture, access, claim } = started;
+  vi.setSystemTime(new Date("2026-01-01T00:00:05.999Z"));
+  const completed = access.archiveJobs.publish(claim, {
+    archivePath: join(fixture.originalsLibraryPath, "synthetic.iso"), sizeBytes: 2048,
+    boundaryEvidence: createNormalDvdArchiveBoundaryEvidenceForTest(2048),
+    integrityEvidence: createCleanReadArchiveIntegrityEvidence("synthetic-policy-v1"),
+  });
+  const archive = access.catalog.listOriginalDiscArchives({ ids: [completed.originalDiscArchiveId!] })[0]!;
+  markArchiveWithDvdRecoveryEvidence(fixture.databasePath, archive.id, "synthetic-saved-timing", {
+    ...(recoveryCompleted ? {} : { archiveRecovery: { id: "synthetic-timing-recovery", workStatus: "claimed" as const } }),
+    // The checkpoint's exact source attempt differs from the other linked job.
+    archiveJobTiming: { startedAt: unavailable ? 9e15 : Date.parse("2026-01-01T00:01:00.250Z"), completedAt: Date.parse("2026-01-01T00:01:09.999Z") },
+  });
+  if (recoveryCompleted) {
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    try {
+      sqlite.prepare(`INSERT INTO archive_recoveries (id, original_disc_archive_id, attempt_id, attempt_ordinal, status, created_at, updated_at)
+        VALUES ('synthetic-timing-recovery', ?, 'synthetic-completed-recovery-attempt', 1, 'completed', 1, 1)`).run(archive.id);
+    } finally { sqlite.close(); }
+  }
+  const sourceJobId = "synthetic-saved-timing-evidence-job";
+  return { ...started, archive, sourceJobId };
 }
 

@@ -14,6 +14,7 @@ import {
   requestArchiveArtifact,
   requestArchiveArtifactAction,
 } from "../lib/archive-artifact-client";
+import { ArchiveJobTimingDisplay } from "./archive-job-timing";
 
 type ArchiveArtifactLoadState =
   | { status: "loading" }
@@ -224,6 +225,11 @@ export function ArchiveArtifactCard({
             ? "completed"
             : job.status} />
         </div>
+        {artifact.initialPreservation.archiveJob === null ? (
+          <p className="job-timing">Timing unavailable</p>
+        ) : (
+          <ArchiveJobTimingDisplay timing={artifact.initialPreservation.archiveJob.timing} />
+        )}
         <dl className="archive-artifact-facts">
           <div>
             <dt>Archive Request</dt>

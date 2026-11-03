@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   createDvdRecoveryEvidenceEncodingTestAccess,
 } from "@rip-dvd/data-access/test-support";
@@ -17,6 +17,7 @@ import { createOperationsResponse } from "../../../operations/route.js";
 const fixtures: Array<ReturnType<typeof createOperatorWorkflowFixture>> = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const fixture of fixtures.splice(0)) fixture.dispose();
 });
 
@@ -116,6 +117,7 @@ it("offers the same checkpoint-bound no-progress Resume through web and CLI", as
         status: "eligible",
       },
     });
+    vi.useFakeTimers({ toFake: ["Date"] });
     const artifactWeb = await createOperationsResponse(
       access,
       new Request(
@@ -129,6 +131,7 @@ it("offers the same checkpoint-bound no-progress Resume through web and CLI", as
       seeded.archive.id,
     ]);
     expect(artifactCli.result).toEqual(await artifactWeb.json());
+    vi.useRealTimers();
     expect(artifactCli.result).toMatchObject({
       item: {
         archiveArtifact: {

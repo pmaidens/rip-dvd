@@ -752,6 +752,7 @@ function readDetail(
   options: {
     limit: number;
     offset: number;
+    observedAt: Date;
     originalsLibraryPath?: string;
     archiveImageOwnership?: Pick<ArchiveImageOwnership, "inspect">;
   },
@@ -1166,6 +1167,14 @@ export function inspectOperations(
   kind: OperationKind,
   options: OperationInspectionOptions = {},
 ) {
+  return inspectOperationsAt(access, kind, { ...options, observedAt: new Date() });
+}
+
+function inspectOperationsAt(
+  access: Pick<DataAccess, "readConsistentSnapshot">,
+  kind: OperationKind,
+  options: OperationInspectionOptions & { observedAt: Date },
+) {
   const limit = options.limit ?? DEFAULT_LIMIT;
   const offset = options.offset ?? 0;
   if (!validOperationLimit(limit) || !Number.isSafeInteger(offset) || offset < 0 ||
@@ -1187,6 +1196,7 @@ export function inspectOperations(
           {
             limit,
             offset,
+            observedAt: options.observedAt,
             ...(options.originalsLibraryPath === undefined
               ? {}
               : { originalsLibraryPath: options.originalsLibraryPath }),
@@ -1204,8 +1214,10 @@ export async function inspectOperationsWithArtifacts(
   kind: OperationKind,
   options: OperationInspectionOptions = {},
 ) {
+  // Observation time is metadata, so it must not make the consistency reads differ.
+  const observationOptions = { ...options, observedAt: new Date() };
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const inspection = inspectOperations(access, kind, options);
+    const inspection = inspectOperationsAt(access, kind, observationOptions);
     if (
       kind !== "original-disc-archives" || options.id === undefined ||
       !("item" in inspection) || inspection.item === null ||
@@ -1222,7 +1234,7 @@ export async function inspectOperationsWithArtifacts(
         access,
         item.archiveArtifact,
       );
-      const refreshedInspection = inspectOperations(access, kind, options);
+      const refreshedInspection = inspectOperationsAt(access, kind, observationOptions);
       if (
         !("item" in refreshedInspection) ||
         refreshedInspection.item === null ||

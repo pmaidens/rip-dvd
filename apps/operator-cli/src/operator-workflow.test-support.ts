@@ -94,6 +94,7 @@ export function markArchiveWithDvdRecoveryEvidence(
       workStatus?: "requested" | "claimed";
     };
     omitEvidenceHeader?: boolean;
+    archiveJobTiming?: { startedAt: number; completedAt: number };
   } = {},
 ): void {
   const sqlite = new DatabaseSync(databasePath);
@@ -269,7 +270,7 @@ export function markArchiveWithDvdRecoveryEvidence(
         priority, progress_phase, progress_percent, progress_bytes,
         last_progress_at, started_at, completed_at, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, 1, 'completed', 0, 'finalizing', 100, ?,
-        1, 1, 1, 1, 1)
+        1, ?, ?, 1, 1)
     `).run(
       jobId,
       requestId,
@@ -278,6 +279,8 @@ export function markArchiveWithDvdRecoveryEvidence(
       originalDiscArchiveId,
       DVD_RECOVERY_EVIDENCE_FORMAT,
       archive.boundary_published_size_bytes,
+      options.archiveJobTiming?.startedAt ?? 1,
+      options.archiveJobTiming?.completedAt ?? 1,
     );
     sqlite.prepare(`
       INSERT INTO dvd_archive_evidence_manifests (

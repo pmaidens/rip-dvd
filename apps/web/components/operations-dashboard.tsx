@@ -1669,6 +1669,7 @@ export function DashboardView({
                           Attempt {attempt.attemptOrdinal} ·{" "}
                           {displayTerm(attempt.status)}
                         </span>
+                        <ArchiveJobTimingDisplay timing={attempt.timing} />
                         {investigation ? (
                           <button
                             type="button"
