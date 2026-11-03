@@ -57,6 +57,7 @@ it("keeps direct JSON CLI and HTTP notification operations equivalent with real 
 
 
 it("shows a labeled Archive Job notification target through both CLI and HTTP detail", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture(); fixtures.push(fixture);
   const access = fixture.openAccess();
   try {
@@ -81,5 +82,5 @@ it("shows a labeled Archive Job notification target through both CLI and HTTP de
     expect(cli.result).toMatchObject({ item: { detectedDisc: { volumeLabel: "Synthetic labeled disc" } } });
     const http = await createOperationsResponse(access, new Request(`https://operator.example/api/operations?kind=archive-jobs&id=${job.id}`));
     expect(await http.json()).toEqual(cli.result);
-  } finally { access.close(); }
+  } finally { vi.useRealTimers(); access.close(); }
 });

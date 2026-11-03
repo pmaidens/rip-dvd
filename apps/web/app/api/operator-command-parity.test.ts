@@ -2078,7 +2078,6 @@ it("reports a missing marked Title Damage checkpoint through web and CLI", async
 });
 
 it("keeps every structural assessment state identical through web and CLI", async () => {
-  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [{
     startLba: 10,
@@ -2208,7 +2207,6 @@ it("keeps every structural assessment state identical through web and CLI", asyn
     });
 
   } finally {
-    vi.useRealTimers();
     access.close();
     fixture.dispose();
   }
@@ -2619,7 +2617,6 @@ it("reports unsupported Archive evidence formats consistently through web and CL
 });
 
 it("presents a clean new-format save as completed without scheduling source reads", async () => {
-  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const seedAccess = createLegacySidecarDataAccess({
     databasePath: fixture.databasePath,
@@ -2831,7 +2828,6 @@ it("presents a clean new-format save as completed without scheduling source read
     });
     expect(sourceSnapshotReadCount).toBe(4);
   } finally {
-    vi.useRealTimers();
     access.close();
     fixture.dispose();
   }
@@ -3782,7 +3778,6 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
 });
 
 it("reports Archive Recovery conflicts identically through Encode web and CLI operations", async () => {
-  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const { archive, correctedSelection, predecessor } =
     seedCatalogReviewForReadFixture(fixture);
@@ -3967,7 +3962,6 @@ it("reports Archive Recovery conflicts identically through Encode web and CLI op
     expect(JSON.stringify(encodeCli.result)).not.toContain("claimToken");
     expect(JSON.stringify(encodeCli.result)).not.toContain("claimedBy");
   } finally {
-    vi.useRealTimers();
     access.close();
     fixture.dispose();
   }
