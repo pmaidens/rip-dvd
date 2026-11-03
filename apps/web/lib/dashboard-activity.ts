@@ -410,6 +410,7 @@ export function watchDashboardActivity({
   let active = true;
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
+  let hasFreshStreamObservation = false;
   let activeDetailAbortController: AbortController | undefined;
   let investigationRefresh: Promise<void> | undefined;
   const detailQueue: Array<{ id: string; detectedAt: string; key: string }> = [];
@@ -429,6 +430,9 @@ export function watchDashboardActivity({
       return;
     }
     onSnapshot(latestSnapshot);
+    if (hasFreshStreamObservation) {
+      onStreamStatus("live");
+    }
   };
 
   function startInvestigationRefresh() {
@@ -597,13 +601,9 @@ export function watchDashboardActivity({
       try {
         onStreamStatus("connecting");
         eventSource = eventSourceFactory(catalogReviewCursor);
-        eventSource.onopen = () => {
-          if (active) {
-            onStreamStatus("live");
-          }
-        };
         eventSource.onerror = () => {
           if (active) {
+            hasFreshStreamObservation = false;
             onStreamStatus("reconnecting");
           }
         };
@@ -616,6 +616,8 @@ export function watchDashboardActivity({
             latestSnapshot = latestSnapshot
               ? mergeActivitySnapshot(latestSnapshot, activity)
               : activity;
+            // A reopened transport alone cannot confirm the job's current status.
+            hasFreshStreamObservation = true;
             publishLatestSnapshot();
             queueMissingDetails(activity);
           } catch {

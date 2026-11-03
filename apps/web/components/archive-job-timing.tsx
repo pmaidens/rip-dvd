@@ -5,7 +5,10 @@ import { useEffect, useState } from "react";
 import { formatDuration } from "../lib/display-value";
 
 /** Remounted for each backend observation, so only local elapsed time is added. */
-export function ArchiveJobTimingDisplay({ timing }: { timing: ArchiveJobTiming }) {
+export function ArchiveJobTimingDisplay({ timing, provisional = false }: {
+  timing: ArchiveJobTiming;
+  provisional?: boolean;
+}) {
   const [anchor] = useState(() => performance.now());
   const [elapsedMs, setElapsedMs] = useState(0);
   useEffect(() => {
@@ -24,6 +27,9 @@ export function ArchiveJobTimingDisplay({ timing }: { timing: ArchiveJobTiming }
   return (
     <p className="job-timing">
       {timing.state === "running" ? "Elapsed time" : "Final duration"}: {formatDuration(seconds)}
+      {timing.state === "running" && provisional ? (
+        <> <span>Provisional, job status unconfirmed</span></>
+      ) : null}
     </p>
   );
 }
