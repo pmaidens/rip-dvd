@@ -684,12 +684,14 @@ function formatProgressAge(durationSeconds: number): string {
 
 function ArchiveJobItem({
   job,
+  timingProvisional,
   busy,
   onRefresh,
   onCancel,
   onInvestigate,
 }: {
   job: DashboardArchiveJob;
+  timingProvisional: boolean;
   busy: boolean;
   onRefresh(): void;
   onCancel: (archiveRequestId: string) => void;
@@ -729,6 +731,7 @@ function ArchiveJobItem({
         <ArchiveJobTimingDisplay
           key={`${job.id}:${job.timing.observedAt}:${job.timing.state}`}
           timing={job.timing}
+          provisional={timingProvisional}
         />
       ) : null}
       failureAction={investigation ? (
@@ -1404,6 +1407,7 @@ export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
 
 export function DashboardView({
   state,
+  streamStatus = "live",
   section = "all",
   catalogReviewView = "needs_review",
   catalogReviewQuery = "",
@@ -1429,6 +1433,7 @@ export function DashboardView({
   onRefresh = () => undefined,
 }: {
   state: DashboardLoadState;
+  streamStatus?: DashboardStreamStatus;
   section?: "all" | "discs" | "encoding" | "catalog";
   catalogReviewView?: CatalogReviewArchiveView;
   catalogReviewQuery?: string;
@@ -1637,6 +1642,7 @@ export function DashboardView({
           <div key={group.archiveRequestId} className="archive-attempt-group">
             <ArchiveJobItem
               job={group.latest}
+              timingProvisional={streamStatus === "reconnecting" || streamStatus === "unavailable"}
               busy={busyWorkflowId === group.archiveRequestId}
               onRefresh={onRefresh}
               onCancel={onCancelArchiveRequest}
@@ -3026,6 +3032,7 @@ export function OperationsDashboard({
       ) : page === "encoding" ? null : (
         <DashboardView
           state={state}
+          streamStatus={streamStatus}
           section={page}
           onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
           approvingDetectedDiscId={approvingDetectedDiscId}

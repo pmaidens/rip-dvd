@@ -25,26 +25,33 @@ function runningJob(): DashboardArchiveJob {
   };
 }
 
-async function timingDashboard(page: Page, initial: DashboardSnapshot) {
+async function timingDashboard(page: Page, initial: DashboardSnapshot, streamAvailable = true) {
   let persisted = initial;
   await page.clock.install({ time: new Date("2035-06-01T12:00:00Z") });
   // Control the status transport while exercising the real dashboard adapter.
-  await page.addInitScript(() => {
+  await page.addInitScript((streamAvailable) => {
     class SyntheticEventSource extends EventTarget {
-      onopen: (() => void) | null = null;
-      onerror: (() => void) | null = null;
       listener = (event: Event) => this.dispatchEvent(new MessageEvent("dashboard", {
         data: JSON.stringify((event as CustomEvent).detail),
       }));
+      disconnect = () => this.dispatchEvent(new Event("error"));
+      reopen = () => this.dispatchEvent(new Event("open"));
       constructor() {
         super();
+        if (!streamAvailable) throw new Error("Synthetic unavailable stream");
         window.addEventListener("synthetic-dashboard", this.listener);
-        queueMicrotask(() => this.onopen?.());
+        window.addEventListener("synthetic-disconnect", this.disconnect);
+        window.addEventListener("synthetic-reopen", this.reopen);
+        queueMicrotask(this.reopen);
       }
-      close() { window.removeEventListener("synthetic-dashboard", this.listener); }
+      close() {
+        window.removeEventListener("synthetic-dashboard", this.listener);
+        window.removeEventListener("synthetic-disconnect", this.disconnect);
+        window.removeEventListener("synthetic-reopen", this.reopen);
+      }
     }
     Object.defineProperty(window, "EventSource", { value: SyntheticEventSource });
-  });
+  }, streamAvailable);
   await page.route((url) => url.pathname === "/api/dashboard", (route) =>
     route.fulfill({ contentType: "application/json", body: JSON.stringify(persisted) }));
   return {
@@ -53,6 +60,8 @@ async function timingDashboard(page: Page, initial: DashboardSnapshot) {
       await page.evaluate((detail) => window.dispatchEvent(new CustomEvent("synthetic-dashboard", { detail })), next);
     },
     persist(next: DashboardSnapshot) { persisted = next; },
+    async disconnect() { await page.evaluate(() => window.dispatchEvent(new Event("synthetic-disconnect"))); },
+    async reopen() { await page.evaluate(() => window.dispatchEvent(new Event("synthetic-reopen"))); },
   };
 }
 
@@ -86,8 +95,11 @@ test(`replaces a delayed ${status} update with persisted final time and restores
   const backend = await timingDashboard(page, snapshot(job));
   await page.goto("/discs");
   await expect(page.getByText("Elapsed time: 2s", { exact: true })).toBeVisible();
+  await backend.observe(snapshot(job));
+  await backend.disconnect();
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toBeVisible();
   await page.clock.runFor(10_000);
-  await expect(page.getByText("Elapsed time: 12s", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Elapsed time: 12s/)).toBeVisible();
   const completedAt = "2026-01-01T00:00:05.999Z";
   const final = snapshot({ ...job, status, completedAt,
     ...(status === "failed" ? { investigation: {
@@ -100,9 +112,15 @@ test(`replaces a delayed ${status} update with persisted final time and restores
     } } : {}),
     timing: { ...job.timing, state: "final", completedAt,
       observedAt: "2026-01-01T00:00:20.999Z", elapsedSeconds: 5 } });
+  backend.persist(final);
+  await backend.reopen();
+  await expect(page.getByRole("status").filter({ hasText: "Live updates reconnecting" })).toBeVisible();
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toBeVisible();
   await backend.observe(final);
   await expect(page.getByText("Final duration: 5s", { exact: true })).toBeVisible();
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toHaveCount(0);
   if (status === "failed") await expect(page.getByRole("button", { name: "Investigate", exact: true })).toBeVisible();
+  await backend.disconnect();
   await page.clock.runFor(60_000);
   await expect(page.getByText("Final duration: 5s", { exact: true })).toBeVisible();
   await page.reload();
@@ -113,6 +131,62 @@ test(`replaces a delayed ${status} update with persisted final time and restores
 });
 
 }
+
+test("keeps provisional time advancing until a fresh running snapshot confirms status", async ({ page }) => {
+  const job = runningJob();
+  const backend = await timingDashboard(page, snapshot(job));
+  await page.goto("/discs");
+  await expect(page.getByText("Elapsed time: 2s", { exact: true })).toBeVisible();
+  await backend.observe(snapshot(job));
+  await backend.disconnect();
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toBeVisible();
+  await page.clock.setSystemTime(new Date("2045-01-01T00:00:00Z"));
+  await page.clock.runFor(10_000);
+  const timer = page.getByText(/Elapsed time: 12s/);
+  await expect(timer).toBeVisible();
+  expect(await timer.evaluate((element) => element.closest('[aria-live]:not([aria-live="off"]), [role="status"], [role="alert"], [role="log"]') !== null)).toBe(false);
+  await backend.reopen();
+  await page.clock.runFor(1000);
+  await expect(page.getByText(/Elapsed time: 13s/)).toBeVisible();
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toBeVisible();
+  await backend.observe(snapshot({ ...job, timing: { ...job.timing,
+    observedAt: "2026-01-01T00:00:10.999Z", elapsedSeconds: 10 } }));
+  await expect(page.getByText("Elapsed time: 10s", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Live updates connected" })).toBeVisible();
+  await page.clock.runFor(1000);
+  await expect(page.getByText("Elapsed time: 11s", { exact: true })).toBeVisible();
+});
+
+test("restores the final duration on reopening after missing completion entirely", async ({ page }) => {
+  const job = runningJob();
+  const backend = await timingDashboard(page, snapshot(job));
+  await page.goto("/discs");
+  await expect(page.getByText("Elapsed time: 2s", { exact: true })).toBeVisible();
+  await backend.disconnect();
+  const completedAt = "2026-01-01T00:00:05.999Z";
+  backend.persist(snapshot({ ...job, status: "completed", completedAt,
+    timing: { ...job.timing, state: "final", completedAt,
+      observedAt: "2026-01-01T00:01:00.000Z", elapsedSeconds: 5 } }));
+  await page.goto("/");
+  await page.goto("/discs");
+  await expect(page.getByText("Final duration: 5s", { exact: true })).toBeVisible();
+  await page.clock.runFor(60_000);
+  await expect(page.getByText("Final duration: 5s", { exact: true })).toBeVisible();
+});
+
+test("labels an unavailable stream's running timer provisional without inventing historical timing", async ({ page }) => {
+  const job = runningJob();
+  const backend = await timingDashboard(page, snapshot(job), false);
+  await page.goto("/discs");
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toBeVisible();
+  await page.clock.runFor(10_000);
+  await expect(page.getByText(/Elapsed time: 12s/)).toBeVisible();
+  backend.persist(snapshot({ ...job, startedAt: null,
+    timing: { ...job.timing, state: "unavailable", startedAt: null, elapsedSeconds: null } }));
+  await page.reload();
+  await expect(page.getByText("Timing unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText("Provisional, job status unconfirmed", { exact: true })).toHaveCount(0);
+});
 
 test("restores running timing on refresh and shows unavailable history and unbounded hours", async ({ page }) => {
   const job = runningJob();

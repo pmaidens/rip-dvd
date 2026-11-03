@@ -1486,6 +1486,7 @@ describe("watchDashboardActivity", () => {
     expect(onStreamStatus).toHaveBeenLastCalledWith("reconnecting");
 
     eventSource.onopen?.();
+    expect(onStreamStatus).toHaveBeenLastCalledWith("reconnecting");
     dashboardListener?.({
       data: JSON.stringify(reconnected),
     } as MessageEvent<string>);
