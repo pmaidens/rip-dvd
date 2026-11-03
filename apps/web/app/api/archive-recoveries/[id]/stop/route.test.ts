@@ -19,6 +19,7 @@ import { handleNotifications } from "../../../notifications/route.js";
 const fixtures: Array<ReturnType<typeof createOperatorWorkflowFixture>> = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   for (const fixture of fixtures.splice(0)) fixture.dispose();
 });
@@ -142,6 +143,7 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
         ]),
       },
     });
+    vi.useFakeTimers({ toFake: ["Date"] });
     const artifactWeb = await createOperationsResponse(
       access,
       new Request(
@@ -155,6 +157,7 @@ it("offers the same attempt-bound durable Stop through web and CLI", async () =>
       seeded.archive.id,
     ]);
     expect(artifactCli.result).toEqual(await artifactWeb.json());
+    vi.useRealTimers();
     expect(artifactCli.result).toMatchObject({
       item: { archiveArtifact: { recovery: { state: "stopped" } } },
     });

@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   createDvdDiscVerificationResultDigest,
   type DvdDiscVerificationDiagnostic,
@@ -15,7 +15,10 @@ import { createOperationsResponse } from "../../../operations/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
-afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
+afterEach(() => {
+  vi.useRealTimers();
+  fixtures.splice(0).forEach((fixture) => fixture.dispose());
+});
 
 function request(id: string, body: unknown): Request {
   return new Request(
@@ -174,6 +177,7 @@ it.each(["mismatch", "inconclusive"] as const)(
       expect(webRecorded.status).toBe(201);
       expect(cliReplay.exitCode).toBe(0);
       expect(await webRecorded.json()).toEqual(cliReplay.result);
+      vi.useFakeTimers({ toFake: ["Date"] });
       const artifactWeb = await createOperationsResponse(
         access,
         new Request(
@@ -187,6 +191,7 @@ it.each(["mismatch", "inconclusive"] as const)(
         seeded.archive.id,
       ]);
       expect(artifactCli.result).toEqual(await artifactWeb.json());
+      vi.useRealTimers();
       expect(artifactCli.result).toMatchObject({
         item: {
           archiveArtifact: {

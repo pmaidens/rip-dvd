@@ -2,7 +2,7 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { ArchiveRecoveryId } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
@@ -20,7 +20,10 @@ import {
 import { createOperationsResponse } from "../../../operations/route.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
-afterEach(() => fixtures.splice(0).forEach((fixture) => fixture.dispose()));
+afterEach(() => {
+  vi.useRealTimers();
+  fixtures.splice(0).forEach((fixture) => fixture.dispose());
+});
 
 async function seedRecovery(
   fixture: ReturnType<typeof createOperatorWorkflowFixture>,
@@ -173,6 +176,7 @@ it("keeps web and JSON CLI submission, progress, replay, and evidence equal", as
         reconciliation: { status: "completed" },
       },
     });
+    vi.useFakeTimers({ toFake: ["Date"] });
     const artifactWeb = await createOperationsResponse(
       access,
       new Request(
@@ -186,6 +190,7 @@ it("keeps web and JSON CLI submission, progress, replay, and evidence equal", as
       seeded.archive.id,
     ]);
     expect(artifactCli.result).toEqual(await artifactWeb.json());
+    vi.useRealTimers();
     expect(artifactCli.result).toMatchObject({
       item: {
         archiveArtifact: {
