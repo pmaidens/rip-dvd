@@ -90,10 +90,19 @@ test(`replaces a delayed ${status} update with persisted final time and restores
   await expect(page.getByText("Elapsed time: 12s", { exact: true })).toBeVisible();
   const completedAt = "2026-01-01T00:00:05.999Z";
   const final = snapshot({ ...job, status, completedAt,
+    ...(status === "failed" ? { investigation: {
+      incidentId: "synthetic-timing-failure", worker: "Archive Worker",
+      subjectType: "Archive Job", subjectId: job.id, attempt: 1,
+      reasonCode: "archive_read.unknown", failedPhase: "Copying", occurredAt: completedAt,
+      retryability: "appropriate" as const, retryabilityDetail: "The attempt can be retried.",
+      explanation: "Synthetic terminal read failure.", suggestedAction: "Inspect the disc before retrying.",
+      technicalEvidence: [],
+    } } : {}),
     timing: { ...job.timing, state: "final", completedAt,
       observedAt: "2026-01-01T00:00:20.999Z", elapsedSeconds: 5 } });
   await backend.observe(final);
   await expect(page.getByText("Final duration: 5s", { exact: true })).toBeVisible();
+  if (status === "failed") await expect(page.getByRole("button", { name: "Investigate", exact: true })).toBeVisible();
   await page.clock.runFor(60_000);
   await expect(page.getByText("Final duration: 5s", { exact: true })).toBeVisible();
   await page.reload();
