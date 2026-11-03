@@ -2,8 +2,30 @@ import { afterEach, expect, it, vi } from "vitest";
 import { saveTimingArchive, startTimingAttempt } from "../../../../operator-cli/src/archive-job-timing.test-support";
 import { createOperationsResponse } from "./route";
 import { createDashboardResponse } from "../dashboard/route";
+import { inspectOperationsWithArtifacts } from "@rip-dvd/application";
+import { defaultArchiveImageOwnership } from "@rip-dvd/worker-runtime";
 
 afterEach(() => vi.useRealTimers());
+
+it("keeps saved archive inspection available while time advances between consistency reads", async () => {
+  const { fixture, access, archive } = await saveTimingArchive();
+  try {
+    vi.setSystemTime(new Date("2026-02-01T00:00:00Z"));
+    const result = await inspectOperationsWithArtifacts(access, "original-disc-archives", {
+      id: archive.id, originalsLibraryPath: fixture.originalsLibraryPath,
+      archiveImageOwnership: {
+        inspect(input) {
+          // Filesystem observations can outlast one clock tick.
+          vi.setSystemTime(Date.now() + 1000);
+          return defaultArchiveImageOwnership.inspect(input);
+        },
+      },
+    });
+    expect(result).toMatchObject({ item: { archiveArtifact: { initialPreservation: { archiveJob: { timing: {
+      state: "final", elapsedSeconds: 9, observedAt: "2026-02-01T00:00:00.000Z",
+    } } } } } });
+  } finally { access.close(); fixture.dispose(); }
+});
 
 it("keeps retry and older-attempt timing identical in CLI, HTTP inspection and dashboard history", async () => {
   const { fixture, access, claim } = await startTimingAttempt();

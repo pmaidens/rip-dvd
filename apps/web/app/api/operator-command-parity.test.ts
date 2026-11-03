@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -87,6 +87,8 @@ import {
 import { readDashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
+
+afterEach(() => vi.useRealTimers());
 
 it("keeps archive-only and reopen choices identical through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
@@ -2078,6 +2080,7 @@ it("reports a missing marked Title Damage checkpoint through web and CLI", async
 });
 
 it("keeps every structural assessment state identical through web and CLI", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const { archive, manifest } = await seedCommittedArchiveEvidence(fixture, [{
     startLba: 10,
@@ -2617,6 +2620,7 @@ it("reports unsupported Archive evidence formats consistently through web and CL
 });
 
 it("presents a clean new-format save as completed without scheduling source reads", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const seedAccess = createLegacySidecarDataAccess({
     databasePath: fixture.databasePath,
@@ -3778,6 +3782,7 @@ it("shares Encode Job validation and keyed outcomes across web and CLI", async (
 });
 
 it("reports Archive Recovery conflicts identically through Encode web and CLI operations", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const { archive, correctedSelection, predecessor } =
     seedCatalogReviewForReadFixture(fixture);

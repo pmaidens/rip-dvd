@@ -217,6 +217,7 @@ export function describeArchiveArtifact(
     originalsLibraryPath?: string;
     archiveImageOwnership?: Pick<ArchiveImageOwnership, "inspect">;
     ownershipInspection?: ReturnType<ArchiveImageOwnership["inspect"]>;
+    observedAt?: Date;
   } = {},
 ): ArchiveArtifact | null {
   const archiveJobs = access.archiveJobs.listForArchive(archive.id);
@@ -407,7 +408,7 @@ export function describeArchiveArtifact(
         : { id: archiveRequest.id, status: archiveRequest.status },
       archiveJob: archiveJob === null
         ? null
-        : { id: archiveJob.id, status: archiveJob.status, timing: describeArchiveJobTiming(archiveJob) },
+        : { id: archiveJob.id, status: archiveJob.status, timing: describeArchiveJobTiming(archiveJob, options.observedAt) },
     },
     recovery: {
       state: recoveryState,
