@@ -1,3 +1,4 @@
+import { describeArchiveJobTiming } from "./archive-job-timing.js";
 import {
   activeEncodeWorkIdentities,
   archiveRecoveryWorkIdentity,
@@ -129,7 +130,7 @@ function visibleInspection({ claimToken: _claimToken, ...inspection }: DiscInspe
 }
 
 function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...job }: ArchiveJob) {
-  return job;
+  return { ...job, timing: describeArchiveJobTiming(job) };
 }
 
 function visibleDvdRecoveryReconciliation(

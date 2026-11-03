@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { unavailableArchiveJobTiming } from "../test/archive-job-timing-fixture";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -986,6 +987,7 @@ describe("DashboardView", () => {
             id: "archive-job-1",
             detectedDiscId: "disc-1",
             archiveRequestId: "archive-request-1",
+            ...unavailableArchiveJobTiming,
             attemptOrdinal: 1,
             discLabel: "MY_MOVIE",
             opticalDriveName: "Upper drive",
@@ -1218,6 +1220,7 @@ describe("DashboardView", () => {
                   id: "failed-archive",
                   detectedDiscId: "failed-disc",
                   archiveRequestId: "failed-request",
+                  ...unavailableArchiveJobTiming,
                   attemptOrdinal: 1,
                   discLabel: "FAILED_DISC",
                   opticalDriveName: "Upper drive",
@@ -1614,6 +1617,7 @@ describe("DashboardView", () => {
           id: "live-context-archive",
           detectedDiscId: "live-context-disc",
           archiveRequestId: "live-context-request",
+          ...unavailableArchiveJobTiming,
           attemptOrdinal: 1,
           discLabel: "LIVE_CONTEXT_DISC",
           opticalDriveName: "Upper drive",
@@ -1689,6 +1693,7 @@ describe("DashboardView", () => {
             id: "latest-archive-job",
             detectedDiscId: "retryable-disc",
             archiveRequestId: "retryable-request",
+            ...unavailableArchiveJobTiming,
             attemptOrdinal: 2,
             discLabel: "RETRYABLE_DISC",
             opticalDriveName: "Upper drive",
@@ -1708,6 +1713,7 @@ describe("DashboardView", () => {
             id: "older-archive-job",
             detectedDiscId: "retryable-disc",
             archiveRequestId: "retryable-request",
+            ...unavailableArchiveJobTiming,
             attemptOrdinal: 1,
             discLabel: "RETRYABLE_DISC",
             opticalDriveName: "Upper drive",
@@ -1749,6 +1755,7 @@ describe("DashboardView", () => {
       id,
       detectedDiscId: "history-disc",
       archiveRequestId: "history-request",
+      ...unavailableArchiveJobTiming,
       attemptOrdinal,
       discLabel: "HISTORY_DISC",
       opticalDriveName: "Upper drive",
@@ -1822,6 +1829,7 @@ describe("DashboardView", () => {
                 id: "denied-archive",
                 detectedDiscId: "denied-disc",
                 archiveRequestId: "denied-request",
+                ...unavailableArchiveJobTiming,
                 attemptOrdinal: 1,
                 discLabel: "DENIED_DISC",
                 opticalDriveName: "Upper drive",
@@ -1878,6 +1886,7 @@ describe("DashboardView", () => {
           id: `archive-job-${index}`,
           detectedDiscId: `disc-${index}`,
           archiveRequestId: `request-${index}`,
+          ...unavailableArchiveJobTiming,
           attemptOrdinal: 1,
           discLabel: `DISC_${index}`,
           opticalDriveName: "Upper drive",
@@ -1914,6 +1923,7 @@ describe("DashboardView", () => {
           id: "stalled-archive-job",
           detectedDiscId: "stalled-disc",
           archiveRequestId: "stalled-request",
+          ...unavailableArchiveJobTiming,
           attemptOrdinal: 1,
           discLabel: "BARBIE",
           opticalDriveName: "Upper drive",

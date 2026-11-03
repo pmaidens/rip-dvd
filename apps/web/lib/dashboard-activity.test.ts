@@ -1,3 +1,4 @@
+import { unavailableArchiveJobTiming } from "../test/archive-job-timing-fixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { EncodeJobId } from "@rip-dvd/data-access";
@@ -151,6 +152,7 @@ describe("watchDashboardActivity", () => {
         activityRevision: "2026-08-31T06:00:00.000Z",
         detectedDiscId: "disc-1",
         archiveRequestId: "request-1",
+        ...unavailableArchiveJobTiming,
         attemptOrdinal: 1,
         discLabel: "LIVE_FAILURE",
         opticalDriveName: "Upper drive",
@@ -542,6 +544,7 @@ describe("watchDashboardActivity", () => {
         activityRevision: "2026-08-31T06:00:00.000Z",
         detectedDiscId: "disc-1",
         archiveRequestId: "request-1",
+        ...unavailableArchiveJobTiming,
         attemptOrdinal: 1,
         discLabel: "LIVE_RETRY",
         opticalDriveName: "Upper drive",
@@ -569,6 +572,7 @@ describe("watchDashboardActivity", () => {
         activityRevision: "2026-08-31T06:00:01.000Z",
         detectedDiscId: "disc-1",
         archiveRequestId: "request-1",
+        ...unavailableArchiveJobTiming,
         attemptOrdinal: 2,
         discLabel: "LIVE_RETRY",
         opticalDriveName: "Upper drive",
@@ -1111,6 +1115,7 @@ describe("watchDashboardActivity", () => {
         id: "job-1",
         detectedDiscId: "disc-1",
         archiveRequestId: "request-1",
+        ...unavailableArchiveJobTiming,
         attemptOrdinal: 1,
         discLabel: "DISC",
         opticalDriveName: "Drive",
@@ -1363,6 +1368,7 @@ describe("watchDashboardActivity", () => {
             id: "archive-1",
             detectedDiscId: "disc-1",
             archiveRequestId: "request-1",
+            ...unavailableArchiveJobTiming,
             attemptOrdinal: 1,
             discLabel: "LIVE_DISC",
             opticalDriveName: "Upper drive",
