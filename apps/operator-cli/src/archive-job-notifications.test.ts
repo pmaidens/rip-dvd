@@ -206,6 +206,7 @@ it.each([
   { kind: "expired subscription", error: { statusCode: 410 }, status: "failed", failureCode: "subscription_expired" },
   { kind: "permanent rejection", error: { statusCode: 403 }, status: "failed", failureCode: "sender_rejected" },
 ])("retains an Archive Job outcome through $kind and dispatcher restart", async ({ error, status, failureCode }) => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const { fixture } = await createNotificationFixture();
   const { access, claim } = await startArchiveJob(fixture, "Synthetic delivery disc");
   access.archiveJobs.fail(claim, "Synthetic source failure");
