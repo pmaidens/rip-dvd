@@ -254,7 +254,8 @@ describe("GET /api/dashboard/events", () => {
         (item) => item.discLabel !== "Unlabeled disc",
       ),
     ).toBe(true);
-    expect(Buffer.byteLength(event)).toBeLessThan(75_000);
+    // The bounded attempt list also carries persisted timing evidence.
+    expect(Buffer.byteLength(event)).toBeLessThan(85_000);
   });
 
   it("frames the current database snapshot as a reconnectable dashboard event", async () => {

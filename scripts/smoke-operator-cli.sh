@@ -47,6 +47,38 @@ docker compose --project-name "$project_name" --profile maintenance build operat
 docker compose --project-name "$project_name" --profile maintenance run --rm \
   --entrypoint ffprobe operator-cli -version >/dev/null
 
+# Observe persisted attempt timing through the installed executable.
+timing_job="$(docker compose --project-name "$project_name" --profile maintenance run --rm --no-deps --no-TTY --entrypoint node operator-cli --input-type=module <<'JAVASCRIPT'
+import { DatabaseSync } from 'node:sqlite';
+import { createLegacySidecarDataAccess } from './apps/operator-cli/node_modules/@rip-dvd/data-access/dist/legacy-sidecars.js';
+import { loadConfig } from './apps/operator-cli/node_modules/@rip-dvd/config/dist/index.js';
+const config = loadConfig();
+const access = createLegacySidecarDataAccess({ databasePath: config.databasePath });
+try {
+  const drive = access.catalog.upsertOpticalDrive({ devicePath: '/dev/synthetic-timing', isPresent: true });
+  const disc = access.catalog.registerDetectedDisc({ opticalDriveId: drive.id, discKind: 'dvd', fingerprint: 'synthetic-installed-timing' });
+  access.catalog.updateDetectedDiscStatus(disc.id, 'scanned');
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  const sqlite = new DatabaseSync(config.databasePath);
+  try {
+    sqlite.prepare("UPDATE archive_requests SET status = 'needs_attention' WHERE id = ?").run(request.id);
+    sqlite.prepare(`INSERT INTO archive_jobs
+      (id, archive_request_id, detected_disc_id, attempt_ordinal, status, last_progress_at, started_at, completed_at, created_at, updated_at)
+      VALUES (?, ?, ?, 1, 'failed', 1000, 1000, 4750, 1000, 4750)`)
+      .run('synthetic-installed-timing-job', request.id, disc.id);
+  } finally { sqlite.close(); }
+  process.stdout.write('synthetic-installed-timing-job');
+} finally { access.close(); }
+JAVASCRIPT
+)"
+for timing_observation in 1 2; do
+  timing_result="$(invoke inspect archive-jobs "$timing_job")"
+  printf '%s\n' "$timing_result" | assert_json_fields \
+    'item.status=failed' 'item.timing.state=final' 'item.timing.elapsedSeconds=3' \
+    'item.timing.startedAt=1970-01-01T00:00:01.000Z' \
+    'item.timing.completedAt=1970-01-01T00:00:04.750Z'
+done
+
 notification_status="$(invoke notifications status)"
 printf '%s\n' "$notification_status" | assert_json_fields \
   'schemaVersion=1' 'configured=false'

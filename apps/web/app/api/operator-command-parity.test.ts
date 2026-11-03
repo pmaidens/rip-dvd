@@ -4545,6 +4545,7 @@ it("returns the same Catalog Review detail and candidates through web and CLI", 
 });
 
 it("returns the same operational records and evidence through web and CLI", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const fixture = createOperatorWorkflowFixture();
   const access = fixture.openAccess();
   try {
@@ -5489,6 +5490,7 @@ it("returns the same operational records and evidence through web and CLI", asyn
         ]),
       } });
   } finally {
+    vi.useRealTimers();
     access.close();
     fixture.dispose();
   }

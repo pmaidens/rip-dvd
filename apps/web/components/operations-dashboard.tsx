@@ -38,6 +38,7 @@ import {
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import { displayTerm } from "../lib/display-term";
 import { countLabel, formatDuration } from "../lib/display-value";
+import { ArchiveJobTimingDisplay } from "./archive-job-timing";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { ArchiveBoundaryDescription } from "./archive-boundary-description";
@@ -507,6 +508,7 @@ interface DashboardJobItemProps {
   failureDetail?: string | null;
   failureAction?: React.ReactNode;
   annotation?: React.ReactNode;
+  timing?: React.ReactNode;
   action?: React.ReactNode;
   verification?: FilesystemVerificationDisplay;
 }
@@ -520,6 +522,7 @@ function DashboardJobItem({
   failureDetail,
   failureAction,
   annotation,
+  timing,
   action,
   verification,
 }: DashboardJobItemProps) {
@@ -541,6 +544,7 @@ function DashboardJobItem({
           {progressDetail}
         </p>
       ) : null}
+      {timing}
       {status === "failed" ? (
         failureAction ?? (
           <details className="job-failure">
@@ -721,6 +725,12 @@ function ArchiveJobItem({
       status={job.status}
       progressPercent={job.progressPercent}
       progressDetail={archiveProgressDetail(job)}
+      timing={job.timing ? (
+        <ArchiveJobTimingDisplay
+          key={`${job.id}:${job.timing.observedAt}:${job.timing.state}`}
+          timing={job.timing}
+        />
+      ) : null}
       failureAction={investigation ? (
         <button
           className="investigate-action"

@@ -1,6 +1,8 @@
 import {
   describeCatalogReviewWorkflow,
   describeArchiveRequestWaitingStatus,
+  describeArchiveJobTiming,
+  type ArchiveJobTiming,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
   readMediaItemsWithAncestors,
@@ -210,6 +212,9 @@ export interface DashboardArchiveJob {
   discLabel: string;
   opticalDriveName: string;
   status: ArchiveJobStatus;
+  startedAt: string | null;
+  completedAt: string | null;
+  timing: ArchiveJobTiming;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
   progressBytes: number;
@@ -832,7 +837,9 @@ function archiveJobInvestigation({
     failedPhase: job.readFailureStage === null
       ? ARCHIVE_PHASE_LABELS[job.progressPhase]
       : "Copying",
-    occurredAt: (job.completedAt ?? job.updatedAt).toISOString(),
+    occurredAt: job.completedAt !== null && Number.isFinite(job.completedAt.getTime())
+      ? job.completedAt.toISOString()
+      : job.updatedAt.toISOString(),
     retryability,
     retryabilityDetail: retryGuidance.detail,
     explanation: presentation.explanation,
@@ -1372,6 +1379,7 @@ function readDashboardSnapshotRecords(
     includeInvestigations = true,
   }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
+  const observedAt = new Date();
   const opticalDriveSource = readSource(() =>
     access.catalog.listOpticalDrives(
       activityLimit === undefined
@@ -2034,6 +2042,7 @@ function readDashboardSnapshotRecords(
             const drive = disc
               ? drivesById.get(disc.opticalDriveId)
               : undefined;
+            const timing = describeArchiveJobTiming(job, observedAt);
             return {
               id: job.id,
               ...(job.evidenceFormat === "dvd-recovery-evidence-v1" &&
@@ -2058,6 +2067,9 @@ function readDashboardSnapshotRecords(
                 ? driveDisplayName(drive)
                 : "Unknown Optical Drive",
               status: job.status,
+              startedAt: timing.startedAt,
+              completedAt: timing.completedAt,
+              timing,
               progressPhase: job.progressPhase,
               progressPercent: job.progressPercent,
               progressBytes: job.progressBytes,
@@ -2492,7 +2504,7 @@ function readDashboardSnapshotRecords(
         };
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: observedAt.toISOString(),
     opticalDrives,
     detectedDiscs,
     archiveJobs,

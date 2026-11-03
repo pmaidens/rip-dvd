@@ -1,3 +1,4 @@
+export { describeArchiveJobTiming, type ArchiveJobTiming } from "./archive-job-timing.js";
 import { inspectDamagePreviewRenditionAvailability, requestDamagePreviewRendition } from "./damage-preview-rendition.js";
 import { inspectEncodeOutputRenditionAvailability, requestEncodeOutputRendition, inspectBrowserRendition } from "./encode-output-rendition.js";
 import { inspectEncodingReadiness, listEncodingReadinessArchives } from "./encoding-readiness.js";

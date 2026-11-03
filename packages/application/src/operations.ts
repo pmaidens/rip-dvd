@@ -1,3 +1,4 @@
+import { describeArchiveJobTiming } from "./archive-job-timing.js";
 import {
   activeEncodeWorkIdentities,
   archiveRecoveryWorkIdentity,
@@ -130,6 +131,10 @@ function visibleInspection({ claimToken: _claimToken, ...inspection }: DiscInspe
 
 function visibleArchiveJob({ claimToken: _claimToken, claimedBy: _claimedBy, ...job }: ArchiveJob) {
   return job;
+}
+
+function inspectedArchiveJob(job: ArchiveJob) {
+  return { ...visibleArchiveJob(job), timing: describeArchiveJobTiming(job) };
 }
 
 function visibleDvdRecoveryReconciliation(
@@ -716,7 +721,7 @@ function readList(
     case "archive-jobs":
       return recentWork(access.archiveJobs.list(undefined, {
         policy: boundedPolicy(limit),
-      }), ["running"], limit).map(visibleArchiveJob);
+      }), ["running"], limit).map(inspectedArchiveJob);
     case "archive-recoveries":
       return access.catalog.listArchiveRecoveries({ limit })
         .map((recovery) => archiveRecoveryOperation(access, recovery, options));
@@ -829,7 +834,7 @@ function readDetail(
           });
       const evidenceHeaders = evidenceHeadersForArchives(access, archives);
       return {
-        ...visibleArchiveJob(job),
+        ...inspectedArchiveJob(job),
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [job.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
