@@ -1,0 +1,38 @@
+.prototype { padding-bottom: 110px; }
+.demoBar { position: relative; z-index: 12; display: flex; align-items: center; justify-content: space-between; gap: 20px; max-width: 1380px; margin: 0 auto; padding: 14px clamp(20px, 3vw, 48px); border-bottom: 1px solid #afc5bb19; background: #0c1915; }
+.demoLabel { display: flex; align-items: center; gap: 16px; }
+.demoLabel > span { color: #dbb96d; font-size: 10px; letter-spacing: .14em; white-space: nowrap; }
+.demoLabel p { margin: 0; color: #90a59b; font-size: 11px; }
+.controls > summary { padding: 7px 10px; color: #d5ded8; cursor: pointer; list-style: none; font-size: 12px; white-space: nowrap; }
+.controls > summary span { margin-left: 14px; color: #d8b76d; }
+.controls[open] > summary { background: #21382d; border-radius: 6px; }
+.controlPanel { position: absolute; right: 20px; top: 56px; width: min(390px, calc(100vw - 40px)); padding: 22px; border: 1px solid #48604e; border-radius: 10px; background: #10231d; box-shadow: 0 22px 60px #0009; display: grid; gap: 18px; }
+.controlHeading { display: grid; gap: 8px; }
+.controlHeading strong { font-size: 14px; }
+.controlHeading span { font-size: 11px; color: #9fb3a8; line-height: 1.5; }
+.controlPanel label { display: grid; gap: 8px; font-size: 12px; color: #c4d1c8; }
+.controlPanel label > span { color: #ddbf79; }
+.controlPanel select { max-width: 100%; min-height: 40px; background: #0a1813; border: 1px solid #476151; border-radius: 6px; padding: 8px; color: #e6eee7; font-size: 13px; }
+.controlPanel input[type=range] { accent-color: #d6b570; width: 100%; }
+.controlPanel .check { display: flex; align-items: center; gap: 10px; }
+.check input { accent-color: #d6b570; }
+.controlActions { display: flex; gap: 8px; }
+.controlActions button { padding: 8px 12px; font-size: 11px; min-height: 36px; }
+.state { font-size: 11px; color: #92a99c; }
+.state summary { cursor: pointer; }
+.state pre { overflow: auto; max-height: 180px; font-size: 10px; background: #08140e; padding: 10px; }
+.variantDescription { display: flex; gap: 20px; align-items: center; max-width: 1240px; margin: 22px auto 0; padding: 0 28px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #c5ac78; }
+.variantDescription span { color: #718d7f; letter-spacing: 0; text-transform: none; font-size: 11px; }
+.switcher { position: fixed; z-index: 30; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 7px; background: #e8e9df; color: #13281f; border: 1px solid #fff; border-radius: 14px; box-shadow: 0 12px 48px #0009; width: max-content; max-width: calc(100vw - 24px); }
+.switcher button { color: #17362a; background: transparent; border: 0; padding: 7px 10px; min-height: 38px; min-width: 34px; border-radius: 8px; font-size: 14px; }
+.switcher button:hover { background: #ccd3c7; }
+.switcher button:focus-visible { outline: 2px solid #2d6248; }
+.switcherLabel { display: grid; gap: 2px; min-width: 112px; padding: 0 10px; }
+.switcherLabel small { font-size: 8px; letter-spacing: .16em; color: #64746a; }
+.switcherLabel span { font-size: 13px; font-weight: 700; }
+.variantButtons { display: flex; border-left: 1px solid #bdc8bc; padding-left: 8px; gap: 2px; }
+.variantButtons button { font-size: 11px; }
+.variantButtons button[aria-pressed=true] { background: #214333; color: #fff2cf; }
+.notice { position: fixed; bottom: 102px; left: 50%; transform: translateX(-50%); z-index: 20; font-size: 12px; color: #ede4c8; background: #244130; border-radius: 7px; max-width: calc(100% - 32px); text-align: center; }
+.notice:not(:empty) { padding: 12px 18px; border: 1px solid #70846b; }
+@media (max-width: 650px) { .demoLabel { display: block; } .demoLabel p { font-size: 10px; margin-top: 5px; } .variantDescription { padding: 0 20px; } .variantDescription span { display: none; } .switcher { bottom: 12px; gap: 2px; } .switcherLabel { min-width: 95px; padding: 0 3px; } .switcher button { padding: 7px; min-width: 30px; } .variantButtons { padding-left: 4px; } }

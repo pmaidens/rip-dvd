@@ -1,0 +1,43 @@
+.toolbar { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; min-width: 0; }
+.context { display: grid; gap: 6px; }
+.context > span { font-size: 8px; letter-spacing: .16em; color: #81998b; }
+.context strong { display: flex; gap: 12px; align-items: center; font-size: 13px; color: #e0e7d9; font-weight: 550; }
+.context small { color: #92a79b; font-size: 10px; font-weight: 400; }
+.buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.toolbar button, .dialog button { min-height: 38px; padding: 9px 13px; font-size: 11px; font-weight: 600; border-radius: 6px; background: #10251c; border: 1px solid #385644; color: #dce7d9; }
+.toolbar button:hover, .dialog button:hover { background: #1a3527; border-color: #80916b; }
+.toolbar button > span { margin-left: 10px; }
+.toolbar .primary, .dialog .primary { background: #d6bc7d; color: #14291d; border-color: #d6bc7d; }
+.toolbar .primary:hover, .dialog .primary:hover { background: #e5cc91; border-color: #e5cc91; }
+.toolbar .destructive { color: #e5a397; border-color: #735248; background: transparent; }
+.toolbar .destructive:hover { background: #38231c; border-color: #c17b69; }
+.dialog { width: min(580px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); padding: 28px; background: #10231c; color: #eaf0e4; border: 1px solid #49634d; border-radius: 14px; box-shadow: 0 30px 90px #0009; overflow-y: auto; }
+.dialog::backdrop { background: #020c09c9; backdrop-filter: blur(5px); }
+.dialogHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.dialogHeader p { margin: 0 0 10px; color: #d3b775; font-size: 9px; letter-spacing: .16em; }
+.dialogHeader h2 { margin: 0; font-size: 26px; font-family: Georgia, serif; font-weight: 400; letter-spacing: -.03em; line-height: 1.2; }
+.dialogHeader > button { flex-shrink: 0; width: 34px; padding: 0; min-height: 34px; font-size: 21px; background: transparent; }
+.scope { padding: 16px 0; margin: 0; font-size: 12px; color: #c7d3c6; border-bottom: 1px solid #314c39; }
+.scope span { color: #708e7c; padding: 0 6px; }
+.explanation { color: #b7c8ba; font-size: 13px; line-height: 1.7; margin: 20px 0; }
+.cancelSummary { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 18px; border-radius: 8px; background: #0a1913; border: 1px solid #304b38; }
+.cancelSummary > span { font-size: 11px; color: #99afa0; }
+.cancelSummary strong { grid-column: 2; grid-row: 1 / 3; align-self: center; font-family: Georgia,serif; font-size: 33px; font-weight: 400; color: #e2c482; }
+.cancelSummary small { color: #d4dfcf; font-size: 12px; }
+.demoNote { margin: 20px 0 0; font-size: 10px; color: #7e9987; line-height: 1.5; }
+.dialogFooter { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; padding-top: 20px; border-top: 1px solid #314c39; flex-wrap: wrap; }
+.dialog .confirmCancel { background: #9c4d3d; border-color: #b66a56; color: #fff0df; }
+.dialog .confirmCancel:hover { background: #b2614e; border-color: #cb7e68; }
+.failure { border-left: 2px solid #d9856e; background: #33251d; padding: 15px; color: #edbcaa; font-size: 13px; line-height: 1.6; margin: 20px 0; }
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 22px 0; }
+.facts > div { min-width: 0; }
+.facts dt { font-size: 10px; color: #8fa797; margin-bottom: 7px; }
+.facts dd { margin: 0; color: #dbe5d5; font-size: 12px; overflow-wrap: anywhere; }
+.facts code { font-size: 10px; color: #d8bb84; }
+.nextSteps { margin: 22px 0; padding-top: 20px; border-top: 1px solid #314c39; }
+.nextSteps h3 { margin: 0 0 12px; font-size: 13px; font-weight: 550; }
+.nextSteps ol { margin: 0; padding-left: 18px; display: grid; gap: 10px; color: #a8beac; font-size: 12px; line-height: 1.5; }
+.evidence { padding: 13px; border-radius: 7px; border: 1px solid #314c39; font-size: 11px; color: #a4b9a7; }
+.evidence summary { cursor: pointer; }
+.evidence pre { margin-bottom: 0; font-size: 10px; overflow: auto; color: #bfcdbb; }
+@media (max-width: 650px) { .toolbar { gap: 12px; width: 100%; } .context strong { flex-wrap: wrap; gap: 8px; } .buttons { width: 100%; } .toolbar button { min-height: 42px; } .dialog { padding: 22px; } .dialogHeader h2 { font-size: 23px; } .dialogFooter { justify-content: stretch; } .dialogFooter button { flex: 1; } }

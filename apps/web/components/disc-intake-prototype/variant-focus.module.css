@@ -1,0 +1,367 @@
+.focus {
+  --muted: #8b9d96;
+  width: min(1160px, 100%);
+  margin: 0 auto;
+  padding: 34px 36px 28px;
+  color: #f4f3e9;
+}
+
+.heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  color: #d6b76d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .2em;
+}
+
+.heading h1 {
+  margin: 0;
+  font-size: clamp(26px, 3vw, 35px);
+  font-weight: 500;
+  letter-spacing: -.045em;
+}
+
+.intro {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.summary {
+  display: flex;
+  gap: 24px;
+  padding-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.summary strong {
+  margin-right: 4px;
+  color: #eeeede;
+  font-weight: 500;
+}
+
+.driveStrip {
+  display: flex;
+  gap: 9px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #263a32;
+}
+
+.focus .driveChip {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 9px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 12px 14px;
+  border: 1px solid #263b32;
+  border-radius: 9px;
+  background: #0c1c16;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  transition: background .2s, border-color .2s;
+}
+
+.focus .driveChip:hover {
+  background: #15281f;
+  border-color: #72816b;
+}
+
+.focus .driveChip.selected {
+  background: #1d2c20;
+  border-color: #a68c50;
+}
+
+.chipName {
+  color: #e7e9dc;
+  white-space: nowrap;
+}
+
+.chipStatus {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipPercent {
+  margin-left: auto;
+  color: #dfc87f;
+  font-size: 11px;
+}
+
+.stage {
+  padding-top: 24px;
+}
+
+.selectedDrive {
+  text-align: center;
+}
+
+.driveNumber {
+  color: #97a393;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .2em;
+}
+
+.selectedDrive h2 {
+  margin: 7px 0 5px;
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: -.025em;
+}
+
+.selectedDrive p {
+  margin: 0;
+  color: #71857b;
+  font-size: 10px;
+  letter-spacing: .03em;
+}
+
+.discRow {
+  display: grid;
+  grid-template-columns: 1fr minmax(0, 430px) 1fr;
+  align-items: center;
+  gap: 22px;
+  margin: 7px auto 0;
+}
+
+.focus .arrow {
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid #385144;
+  border-radius: 50%;
+  background: transparent;
+  color: #ccd5c8;
+  transition: transform .18s, border-color .18s;
+}
+
+.focus .arrow:hover {
+  transform: scale(1.08);
+  border-color: #bfa35f;
+  background: #17271d;
+}
+
+.discSpotlight {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  isolation: isolate;
+}
+
+.spotlight {
+  position: absolute;
+  z-index: -1;
+  inset: 6%;
+  border-radius: 50%;
+  background: #b1a34a;
+  opacity: .09;
+  filter: blur(52px);
+}
+
+.disc {
+  max-width: 100%;
+  height: auto;
+}
+
+.caption {
+  position: relative;
+  z-index: 1;
+  margin-top: 0;
+  text-align: center;
+}
+
+.phase {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 0 9px;
+  color: #c9b46c;
+  font-size: 11px;
+}
+
+.phase.complete { color: #90c79d; }
+.phase.error { color: #f29987; }
+.phase.idle, .phase.cancelled { color: #91a097; }
+
+.progress {
+  padding-left: 8px;
+  border-left: 1px solid #4f5138;
+  font-variant-numeric: tabular-nums;
+}
+
+.caption h3 {
+  margin: 0;
+  color: #f5f3e7;
+  font-size: 25px;
+  font-weight: 500;
+  letter-spacing: -.035em;
+}
+
+.subtitle {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.errorMessage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 12px auto 0;
+  color: #d8a092;
+  font-size: 12px;
+}
+
+.errorMessage p { margin: 0; }
+
+.focus .errorMessage button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-color: #7a4a3a;
+  background: #321f18;
+  color: #f3c3ab;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.errorMessage button span { margin-left: 8px; }
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin: 10px 0 12px;
+}
+
+.focus .pagination button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.pagination button span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #405348;
+  transition: width .2s, background .2s;
+}
+
+.pagination button.currentDot span {
+  width: 17px;
+  border-radius: 4px;
+  background: #d3b96f;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+  padding: 20px 0;
+  border-top: 1px solid #263a32;
+  border-bottom: 1px solid #263a32;
+}
+
+.metrics div {
+  padding: 0 22px;
+  border-right: 1px solid #263a32;
+}
+
+.metrics div:first-child { padding-left: 0; }
+.metrics div:last-child { border: 0; }
+
+.metrics dt {
+  margin-bottom: 9px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.metrics dd {
+  margin: 0;
+  color: #e0e6d6;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics small {
+  color: #819084;
+  font-size: 11px;
+}
+
+.footnote {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin: 18px 0 0;
+  color: #7f9385;
+  font-size: 10px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.footnoteLine {
+  width: 13px;
+  height: 1px;
+  background: #9d8a53;
+}
+
+@media (max-width: 1000px) {
+  .chipStatus { display: none; }
+  .focus { padding-inline: 24px; }
+}
+
+@media (max-width: 600px) {
+  .focus { padding: 26px 18px 20px; }
+  .heading { margin-bottom: 22px; }
+  .summary { display: none; }
+  .driveStrip { flex-wrap: wrap; padding-bottom: 18px; gap: 8px; }
+  .focus .driveChip { flex: 1 1 42%; min-height: 48px; padding: 10px 12px; }
+  .chipStatus { display: inline; margin-left: auto; font-size: 9px; }
+  .chipPercent { display: none; }
+  .discRow { grid-template-columns: 32px minmax(0, 1fr) 32px; gap: 0; margin-top: 14px; }
+  .focus .arrow { width: 32px; height: 40px; min-height: 40px; border-color: transparent; }
+  .caption { margin-top: 12px; }
+  .caption h3 { font-size: 23px; }
+  .metrics { grid-template-columns: 1fr 1fr; gap: 24px 0; padding: 20px 0; }
+  .metrics div { padding: 0 16px; }
+  .metrics div:nth-child(odd) { padding-left: 0; }
+  .metrics div:nth-child(even) { border-right: 0; }
+  .metrics dd { font-size: 16px; }
+  .errorMessage { flex-direction: column; gap: 10px; }
+  .footnote { align-items: baseline; font-size: 10px; }
+  .footnoteLine { flex-shrink: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus * { transition: none; }
+}

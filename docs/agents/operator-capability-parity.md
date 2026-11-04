@@ -21,6 +21,14 @@ top-level CLI command remains represented here. That catches additions, but it
 does not prove a row is honest. Reviewers must follow the cited behavior test
 and compare both adapters with the same application rule.
 
+The development-only Disc intake design study is selected by `?variant=A`,
+`?variant=B`, or `?variant=C` on `/discs`. It uses synthetic in-memory drives.
+Its carousel, cancellation confirmation, investigation and activity dialogs,
+retry simulation, artwork toggle and progress controls do not
+query or mutate application operations. It adds no HTTP boundary, background
+work type or CLI capability. The regular `/discs` page and production rendering
+continue to use the existing operations dashboard.
+
 ## Capability inventory
 
 <!-- capability-inventory:start -->
