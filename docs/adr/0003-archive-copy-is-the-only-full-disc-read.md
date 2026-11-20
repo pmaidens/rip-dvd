@@ -8,6 +8,16 @@ bounded endpoint check: the worker reads only the first logical block after the
 accepted size, twice. This check establishes the physical endpoint; it is not a
 second full-disc read.
 
+Legacy copy and rescue use `dvd-recovery-v2` to handle deferred medium sense.
+The helper retries the outstanding request at its original address and length.
+It uses the existing bounded retries and subdivision to isolate requests that
+still yield no data. A single sector that exhausts those retries becomes an
+unresolved placeholder. The rescue map separately records which unresolved
+sectors yielded deferred sense on an individual read. Earlier accepted bytes
+stay in the image, and copying continues at the existing position. Deferred
+sense supplies no endpoint proof. V1 rescue maps remain readable with their
+original policy version.
+
 Archive publication at the size reported by Disc Inspection requires two
 matching normalized logical-block-address-out-of-range responses for that first
 excluded block. A readable block rejects the accepted size. Medium, transport,

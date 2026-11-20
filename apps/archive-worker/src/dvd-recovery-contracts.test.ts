@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
+  createDvdRecoveryProtocolPayload,
   DVD_READ_FAILURE_CLASSIFIER_VERSION,
   DVD_SECTOR_BOUNDARY_PROOF_VERSION,
   formatUnvalidatedDvdRecovery,
   isProvenDvdBoundaryCandidate,
   parseDvdReadFailureResultProtocol,
   parseDvdReadFailureTerminalResultProtocol,
+  parseDvdRecoveryResultProtocol,
   trimDvdRecoveryResult,
   type DvdReadFailureResult,
   validateDvdRecoveryResult,
@@ -38,6 +40,58 @@ function readFailureProtocolPayload(
 }
 
 describe("DVD recovery results", () => {
+  it("round-trips deferred sense only on its unresolved sectors", () => {
+    const bytes = 8 * 2048;
+    const result = createDamagedDvdRecoveryResult(
+      bytes,
+      [{ startLba: 2, sectorCount: 3 }],
+      "dvd-recovery-v2",
+      [{ startLba: 3, sectorCount: 2 }],
+    );
+    const payload = createDvdRecoveryProtocolPayload(result);
+
+    expect(payload).toMatchObject({
+      badSectorBitmapHex: "1c",
+      deferredSenseBitmapHex: "18",
+    });
+    expect(parseDvdRecoveryResultProtocol(JSON.stringify(payload), bytes))
+      .toEqual(result);
+    expect(trimDvdRecoveryResult(result, 4 * 2048)).toMatchObject({
+      deferredSenseSectorRanges: [{ startLba: 3, sectorCount: 1 }],
+    });
+    expect(trimDvdRecoveryResult(result, 3 * 2048))
+      .not.toHaveProperty("deferredSenseSectorRanges");
+    expect(() => parseDvdRecoveryResultProtocol(JSON.stringify({
+      ...payload, deferredSenseBitmapHex: "20",
+    }), bytes)).toThrow();
+    expect(() => parseDvdRecoveryResultProtocol(JSON.stringify({
+      ...payload, recoveryPolicyVersion: "dvd-recovery-v1",
+    }), bytes)).toThrow("DVD recovery helper result is malformed");
+  });
+
+  it.each(["dvd-recovery-v1", "dvd-recovery-v2"] as const)(
+    "preserves %s evidence through parsing and boundary trimming",
+    (version) => {
+      const result = parseDvdRecoveryResultProtocol(JSON.stringify({
+        protocolVersion: 1,
+        declaredByteCount: 8 * 2048,
+        recoveredByteCount: 7 * 2048,
+        recoveryPolicyVersion: version,
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorBitmapHex: "04",
+      }), 8 * 2048);
+
+      expect(result).toEqual(createDamagedDvdRecoveryResult(
+        8 * 2048, [{ startLba: 2, sectorCount: 1 }], version,
+      ));
+      expect(trimDvdRecoveryResult(result, 4 * 2048).recoveryPolicyVersion)
+        .toBe(version);
+      expect(trimDvdRecoveryResult(result, 2 * 2048).recoveryPolicyVersion)
+        .toBe(version);
+    },
+  );
+
   it("trims recovery evidence to the accepted boundary", () => {
     expect(
       trimDvdRecoveryResult(
@@ -312,7 +366,7 @@ describe("DVD recovery results", () => {
     expect(result.recoveryResult).toEqual(
       createDamagedDvdRecoveryResult(40 * 2_048, [
         { startLba: 6, sectorCount: 1 },
-      ]),
+      ], "dvd-recovery-v1"),
     );
   });
 
@@ -345,7 +399,7 @@ describe("DVD recovery results", () => {
     );
 
     expect(result.recoveryResult).toEqual(
-      createCleanDvdRecoveryResult(40 * 2_048),
+      createCleanDvdRecoveryResult(40 * 2_048, "dvd-recovery-v1"),
     );
   });
 
@@ -515,7 +569,7 @@ describe("DVD recovery results", () => {
       outcome: "damaged",
       declaredByteCount: 8_192,
       recoveredByteCount: 4_096,
-      recoveryPolicyVersion: "dvd-recovery-v1",
+      recoveryPolicyVersion: "dvd-recovery-v2",
       badSectorCount: 2,
       badAreaCount: 2,
       unrecoveredSectorRanges: [
@@ -592,5 +646,29 @@ describe("DVD recovery results", () => {
         4 * 2_048,
       ),
     ).toThrow("Resumed DVD recovery result is invalid");
+  });
+
+  it("keeps retained deferred evidence serializable with a V1 copy result", () => {
+    const bytes = 4 * 2_048;
+    const unresolved = [{ startLba: 1, sectorCount: 1 }];
+    const prior = createDamagedDvdRecoveryResult(
+      bytes, unresolved, "dvd-recovery-v2", unresolved,
+    );
+    const copied = createDamagedDvdRecoveryResult(
+      bytes, unresolved, "dvd-recovery-v1",
+    );
+
+    const validated = validateResumedDvdRecoveryResult(copied, prior, bytes);
+
+    expect(validated).toEqual({
+      outcome: "requires_validation",
+      recoveryResult: prior,
+    });
+    if (validated.outcome !== "requires_validation") {
+      throw new Error("Expected the resumed image to remain damaged");
+    }
+    const payload = createDvdRecoveryProtocolPayload(validated.recoveryResult);
+    expect(parseDvdRecoveryResultProtocol(JSON.stringify(payload), bytes))
+      .toEqual(prior);
   });
 });

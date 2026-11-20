@@ -374,13 +374,13 @@ describe.runIf(nativeTestExecutable !== "")(
       expect(salvageValidator.validate).not.toHaveBeenCalled();
     });
 
-    it("keeps repeated deferred medium responses out of rescue and publication", async () => {
+    it("retries persistent deferred errors, preserves later data, and retains exact rescue evidence", async () => {
       const fixture = createFixture(
         "13333333-3333-4333-8333-333333333333",
       );
       const runner = createSyntheticDvdCopyRunner({
         faults: rawCompletionFault(
-          5,
+          35,
           "always",
           fixedDeferredMediumSense(5, 0x05),
         ),
@@ -390,49 +390,138 @@ describe.runIf(nativeTestExecutable !== "")(
       await expect(preserveDvdArchive({
         ...fixture.baseOptions,
         runner,
-      })).rejects.toMatchObject({
-        stage: "initial_copy",
-        readFailure: { category: "unknown", senseResponseCode: 0x71 },
+      })).rejects.toThrow("DVD rescue requires validation");
+
+      expect(runner.results).toEqual([
+        createDamagedDvdRecoveryResult(fixture.content.byteLength, [
+          { startLba: 35, sectorCount: 1 },
+        ], "dvd-recovery-v2", [{ startLba: 35, sectorCount: 1 }]),
+      ]);
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      const rescue = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        fixture.baseOptions.archiveRequest.id,
+      );
+      const expected = Buffer.from(fixture.content);
+      expected.fill(0, 35 * 2048, 36 * 2048);
+      expect(readFileSync(rescue.imagePath)).toEqual(expected);
+
+      const readRecoveryMap = () =>
+        JSON.parse(readFileSync(rescue.mapPath, "utf8")).recoveryProtocol;
+      expect(readRecoveryMap()).toMatchObject({
+        badSectorBitmapHex: "0000000008",
+        deferredSenseBitmapHex: "0000000008",
       });
 
-      expect(runner.results).toEqual([]);
-      expect(existsSync(fixture.archivePath)).toBe(false);
-      expect(
-        readdirSync(realpathSync(fixture.originalsLibraryPath)).some((name) =>
-          name.endsWith(".rip-dvd-rescue.iso"),
-        ),
-      ).toBe(false);
+      const currentSenseRetry = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(35, "always", fixedMediumSense(35)),
+        sourcePath: fixture.sourcePath,
+      });
+      const salvageValidator = {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted" as const,
+        }),
+      };
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: currentSenseRetry,
+        salvageValidator,
+        onProgress: ({ phase }) => {
+          if (phase === "finalizing") {
+            writeFileSync(fixture.archivePath, "concurrent publisher");
+          }
+        },
+      })).rejects.toMatchObject({ code: "EEXIST" });
+      expect(salvageValidator.validate).toHaveBeenCalledOnce();
+      expect(readFileSync(fixture.archivePath, "utf8")).toBe("concurrent publisher");
+      expect(readRecoveryMap().deferredSenseBitmapHex).toBe("0000000008");
+      rmSync(fixture.archivePath);
+
+      const resume = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(35, 1, fixedDeferredMediumSense(35, 5)),
+        sourcePath: fixture.sourcePath,
+      });
+      const preserved = await preserveDvdArchive({
+        ...fixture.baseOptions, runner: resume,
+      });
+      expect(resume.results).toEqual([
+        createCleanDvdRecoveryResult(fixture.content.byteLength),
+      ]);
+      expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
+      expect(preserved.integrityEvidence.integrity).toBe("clean_read");
     });
 
-    it("keeps a deferred response after accepted data out of publication", async () => {
+    it.each([1, 3])("publishes after %i deferred responses from a request after progress", async (failures) => {
       const fixture = createFixture(
         "14444444-4444-4444-8444-444444444444",
       );
       const runner = createSyntheticDvdCopyRunner({
-        faults: rawCompletionFault(35, 1, fixedDeferredMediumSense(35, 5)),
+        faults: rawCompletionFault(35, failures, fixedDeferredMediumSense(35, 5)),
         sourcePath: fixture.sourcePath,
       });
 
-      await expect(preserveDvdArchive({
+      const preserved = await preserveDvdArchive({
         ...fixture.baseOptions,
         runner,
-      })).rejects.toMatchObject({
-        stage: "initial_copy",
-        readFailure: {
-          category: "unknown",
-          senseResponseCode: 0x71,
-          requestedLba: 31,
-          retryOrdinal: 0,
-        },
       });
 
-      expect(runner.results).toEqual([]);
+      expect(runner.results).toEqual([
+        createCleanDvdRecoveryResult(fixture.content.byteLength),
+      ]);
+      expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
+      expect(preserved.integrityEvidence.integrity).toBe("clean_read");
+    });
+
+    it("continues a V1 rescue through deferred retries with a V2 result", async () => {
+      const fixture = createFixture("15555555-5555-4555-8555-555555555555");
+      const runner = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(5, "always", fixedMediumSense(5)),
+        sourcePath: fixture.sourcePath,
+      });
+      await expect(preserveDvdArchive({ ...fixture.baseOptions, runner }))
+        .rejects.toThrow("DVD rescue requires validation");
+      const rescue = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        fixture.baseOptions.archiveRequest.id,
+      );
+      const map = JSON.parse(readFileSync(rescue.mapPath, "utf8"));
+      map.recoveryPolicyVersion = "dvd-recovery-v1";
+      map.recoveryProtocol.recoveryPolicyVersion = "dvd-recovery-v1";
+      writeFileSync(rescue.mapPath, JSON.stringify(map));
+      const resume = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(5, 1, fixedDeferredMediumSense(5, 5)),
+        sourcePath: fixture.sourcePath,
+      });
+
+      const preserved = await preserveDvdArchive({
+        ...fixture.baseOptions, runner: resume,
+      });
+      expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
+      expect(preserved.integrityEvidence).toMatchObject({
+        integrity: "clean_read", policyVersion: "dvd-recovery-v2",
+      });
+    });
+
+    it("rejects a rescue whose policy header disagrees with its result", async () => {
+      const fixture = createFixture("17777777-7777-4777-8777-777777777777");
+      const runner = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(5, "always", fixedMediumSense(5)),
+        sourcePath: fixture.sourcePath,
+      });
+      await expect(preserveDvdArchive({ ...fixture.baseOptions, runner }))
+        .rejects.toThrow("DVD rescue requires validation");
+      const rescue = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        fixture.baseOptions.archiveRequest.id,
+      );
+      const map = JSON.parse(readFileSync(rescue.mapPath, "utf8"));
+      map.recoveryPolicyVersion = "dvd-recovery-v1";
+      writeFileSync(rescue.mapPath, JSON.stringify(map));
+
+      await expect(preserveDvdArchive({ ...fixture.baseOptions, runner }))
+        .rejects.toThrow("DVD rescue state is invalid");
       expect(existsSync(fixture.archivePath)).toBe(false);
-      expect(
-        readdirSync(realpathSync(fixture.originalsLibraryPath)).some((name) =>
-          name.endsWith(".rip-dvd-rescue.iso"),
-        ),
-      ).toBe(false);
     });
 
     it("rolls back same-attempt zero-fill before retaining a boundary prefix", async () => {
@@ -546,6 +635,124 @@ describe.runIf(nativeTestExecutable !== "")(
       });
       expect(readFileSync(preserved.archivePath)).toEqual(expectedImage);
       await preserved.finalizePublication?.();
+    });
+
+    it("retains new deferred observations when a boundary candidate fails completeness validation", async () => {
+      const fixture = createFixture("16777777-7777-4777-8777-777777777777");
+      const firstRunner = createSyntheticDvdCopyRunner({
+        faults: [
+          rawCompletionFault(5, "always", fixedMediumSense(5)),
+          rawCompletionFault(35, "always", fixedMediumSense(35)),
+        ].join(","),
+        sourcePath: fixture.sourcePath,
+      });
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: firstRunner,
+      })).rejects.toThrow("DVD rescue requires validation");
+      const rescue = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        fixture.baseOptions.archiveRequest.id,
+      );
+      const originalMap = JSON.parse(readFileSync(rescue.mapPath, "utf8"));
+      const originalImage = readFileSync(rescue.imagePath);
+      expect(originalMap.recoveryProtocol.deferredSenseBitmapHex).toBeUndefined();
+
+      const resumeRunner = createSyntheticDvdCopyRunner({
+        faults: [
+          rawCompletionFault(5, "always", fixedDeferredMediumSense(5)),
+          rawTailCompletionFault(35, "always", fixedSense(35, 0x05, 0x21)),
+        ].join(","),
+        sourcePath: fixture.sourcePath,
+      });
+      const proofError = new Error("DVD completeness validation interrupted");
+      const prove = vi.fn().mockRejectedValue(proofError);
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        completenessProver: { prove },
+        runner: resumeRunner,
+      })).rejects.toBe(proofError);
+
+      expect(prove).toHaveBeenCalledOnce();
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      expect(readFileSync(rescue.imagePath)).toEqual(originalImage);
+      expect(JSON.parse(readFileSync(rescue.mapPath, "utf8"))).toEqual({
+        ...originalMap,
+        recoveryProtocol: {
+          ...originalMap.recoveryProtocol,
+          deferredSenseBitmapHex: "2000000000",
+        },
+      });
+    });
+
+    it("retains deferred evidence from an extended boundary prefix before publication", async () => {
+      const fixture = createFixture("16888888-8888-4888-8888-888888888888");
+      const firstRunner = createSyntheticDvdCopyRunner({
+        faults: [
+          rawCompletionFault(5, "always", fixedMediumSense(5)),
+          rawCompletionFault(35, "always", fixedSense(35, 5, 0x21)),
+        ].join(","),
+        sourcePath: fixture.sourcePath,
+      });
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: firstRunner,
+      })).rejects.toMatchObject({
+        readFailure: { category: "out_of_range", retainedImageByteCount: 5 * 2_048 },
+      });
+      const rescue = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        fixture.baseOptions.archiveRequest.id,
+      );
+      const readMap = () => JSON.parse(readFileSync(rescue.mapPath, "utf8"));
+      expect(readMap()).toMatchObject({ schemaVersion: 2, recoveryProtocol: null });
+      expect(readFileSync(rescue.imagePath)).toEqual(fixture.content.subarray(0, 5 * 2_048));
+
+      const resumeRunner = createSyntheticDvdCopyRunner({
+        faults: [
+          rawCompletionFault(5, "always", fixedDeferredMediumSense(5)),
+          rawTailCompletionFault(35, "always", fixedSense(35, 5, 0x21)),
+        ].join(","),
+        sourcePath: fixture.sourcePath,
+      });
+      const proofError = new Error("DVD completeness validation interrupted");
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        completenessProver: { prove: vi.fn().mockRejectedValue(proofError) },
+        runner: resumeRunner,
+      })).rejects.toBe(proofError);
+
+      const expectedImage = Buffer.from(fixture.content.subarray(0, 35 * 2_048));
+      expectedImage.fill(0, 5 * 2_048, 6 * 2_048);
+      expect(readFileSync(rescue.imagePath)).toEqual(expectedImage);
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      expect(readMap()).toMatchObject({
+        schemaVersion: 2,
+        imageByteCount: expectedImage.byteLength,
+        recoveryProtocol: {
+          badSectorBitmapHex: "2000000000",
+          deferredSenseBitmapHex: "2000000000",
+        },
+        boundaryFailureProtocol: { firstFailingLba: 35 },
+      });
+
+      const copy = vi.fn();
+      const restarted = await preserveDvdArchive({
+        ...fixture.baseOptions,
+        completenessProver: {
+          prove: vi.fn().mockResolvedValue({ maximumReferencedLba: 34 }),
+        },
+        runner: { ...resumeRunner, copy },
+        salvageValidator: {
+          validate: vi.fn().mockResolvedValue({
+            badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+            outcome: "accepted" as const,
+          }),
+        },
+      });
+      expect(copy).not.toHaveBeenCalled();
+      expect(readFileSync(restarted.archivePath)).toEqual(expectedImage);
+      expect(readMap().recoveryProtocol.deferredSenseBitmapHex).toBe("2000000000");
     });
 
     it.each(distinguishedReadFailures)("keeps $category out of initial recovery and publication", async ({

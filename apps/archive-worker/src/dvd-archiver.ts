@@ -61,7 +61,6 @@ import {
 } from "./dvd-initial-copy.js";
 import {
   DvdReadFailureError,
-  DVD_RECOVERY_POLICY_VERSION,
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
   DVD_SECTOR_SIZE_BYTES,
@@ -125,7 +124,8 @@ import {
 
 const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
 const MAX_COPY_DIAGNOSTIC_BYTES = 65_536;
-const MAX_COPY_PROTOCOL_BYTES = 1_200_000;
+// A 9 GB DVD needs up to two sector bitmaps of about 1.1 MB each in hex.
+const MAX_COPY_PROTOCOL_BYTES = 2_300_000;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
@@ -2324,7 +2324,10 @@ async function publishCorrectedDvdBoundary({
   const retainedRecoveryResult = trimDvdRecoveryResult(
     candidateRecoveryResult ??
       rescueWorkspace.recoveryResult ??
-      createCleanDvdRecoveryResult(boundaryFailure.declaredByteCount),
+      createCleanDvdRecoveryResult(
+        boundaryFailure.declaredByteCount,
+        rescueWorkspace.recoveryPolicyVersion,
+      ),
     publishedSizeBytes,
   );
   const acceptance = await acceptDvdBoundaryRescueWorkspace(
@@ -2343,7 +2346,9 @@ async function publishCorrectedDvdBoundary({
   await authorizeMutation?.();
   signal.throwIfAborted();
   let integrityEvidence: ArchiveIntegrityEvidence =
-    createCleanReadArchiveIntegrityEvidence(DVD_RECOVERY_POLICY_VERSION);
+    createCleanReadArchiveIntegrityEvidence(
+      retainedRecoveryResult.recoveryPolicyVersion,
+    );
   if (retainedRecoveryResult.outcome === "damaged") {
     const decision = await evaluateDvdSalvage({
       expectedTitleMap,
@@ -3051,7 +3056,7 @@ export async function preserveDvdArchive({
     }
     onProgress({ phase: "copying", progressPercent: 0 });
     const copyRateEstimator = createByteProgressRateEstimator();
-    const recoveryResult = await runner.copy({
+    const copiedRecoveryResult = await runner.copy({
       authorizeProbe: revalidateReadFailure,
       authorizeStart: authorizeCopy,
       ...(copyContinuation === undefined
@@ -3085,11 +3090,14 @@ export async function preserveDvdArchive({
     validation =
       rescueWorkspace?.recoveryResult?.outcome === "damaged"
         ? validateResumedDvdRecoveryResult(
-            recoveryResult,
+            copiedRecoveryResult,
             rescueWorkspace.recoveryResult,
             copyOperationSizeBytes,
           )
-        : validateDvdRecoveryResult(recoveryResult, copyOperationSizeBytes);
+        : validateDvdRecoveryResult(copiedRecoveryResult, copyOperationSizeBytes);
+    const recoveryResult = validation.outcome === "requires_validation"
+      ? validation.recoveryResult
+      : copiedRecoveryResult;
     signal.throwIfAborted();
     const partialMetadata = await lstat(partialPath);
     if (
@@ -3274,19 +3282,23 @@ export async function preserveDvdArchive({
     const isReadFailure = error instanceof DvdReadFailureError;
     const isOutOfRangeFailure =
       isReadFailure && error.readFailure.category === "out_of_range";
-    if (isReadFailure && error.recoveryResult !== null) {
+    let boundaryRecovery = isReadFailure ? error.recoveryResult : null;
+    if (boundaryRecovery !== null) {
       if (
         copyContinuation?.kind === "damaged" ||
         copyContinuation?.kind === "corrected"
       ) {
-        validateResumedDvdRecoveryResult(
-          error.recoveryResult,
+        const resumed = validateResumedDvdRecoveryResult(
+          boundaryRecovery,
           copyContinuation.recoveryResult,
           copyOperationSizeBytes,
         );
+        if (resumed.outcome === "requires_validation") {
+          boundaryRecovery = resumed.recoveryResult;
+        }
       } else {
         validateDvdRecoveryResult(
-          error.recoveryResult,
+          boundaryRecovery,
           copyOperationSizeBytes,
         );
       }
@@ -3334,7 +3346,7 @@ export async function preserveDvdArchive({
               error.readFailure,
               authorizeMutation,
               finalizeRetention,
-              error.recoveryResult,
+              boundaryRecovery,
             );
           } else if (isProvenDvdBoundaryCandidate(error.readFailure)) {
             await finalizeRetention();
@@ -3343,6 +3355,15 @@ export async function preserveDvdArchive({
               rescueIdentity,
               rescueWorkspace,
               error.readFailure,
+              {
+                observedRecoveryResult: error.recoveryResult,
+                authorizeMutation: async () => {
+                  await finalizeRetention();
+                  signal.throwIfAborted();
+                  await authorizeMutation?.();
+                  signal.throwIfAborted();
+                },
+              },
             );
           } else {
             rescueWorkspace = await recordDvdBoundaryFailure(
@@ -3352,7 +3373,7 @@ export async function preserveDvdArchive({
               error.readFailure,
               authorizeMutation,
               finalizeRetention,
-              error.recoveryResult,
+              boundaryRecovery,
             );
           }
           partialPath = rescueWorkspace.imagePath;
@@ -3379,9 +3400,9 @@ export async function preserveDvdArchive({
         archivePath,
         authorizeMutation,
         boundaryFailure: error.readFailure,
-        ...(error.recoveryResult === null
+        ...(boundaryRecovery === null
           ? {}
-          : { candidateRecoveryResult: error.recoveryResult }),
+          : { candidateRecoveryResult: boundaryRecovery }),
         completenessProver,
         expectedTitleMap,
         onProgress,

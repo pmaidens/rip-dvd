@@ -53,17 +53,35 @@ Current SPC also uses the header's SDAT_OVFL bit to report omitted sense data. `
 
 ### Current versus deferred errors
 
-Deferred responses `71h` and `73h` describe a previous command. They may be decoded for diagnostics, but they must not authorize recovery or zero substitution for the current requested range. Recovery should require current response `70h` or `72h`. This is one place where the existing conservative behavior is right.
+Deferred responses `71h` and `73h` describe a previous command. They do not
+identify damage in the current request. The general classifier therefore keeps
+them `unknown`, and never uses their information field to prove a physical
+endpoint. The address of a read that returned no data is still known from the
+request itself, so that request can be retried without claiming to have located
+the original error.
 
-A completed first READ(10) of a fresh image with CHECK CONDITION and deferred
-medium sense gets one absolute repeat of that range. No archive data has yet
-been accepted, so a successful repeat supplies actual data; a current medium
-response enters the existing bounded recovery path. A deferred response after
-any accepted data or during rescue remains `unknown`: its earlier command may
-have supplied data that repeating the current range would leave unverified.
-Another deferred response on the initial repeat also remains `unknown`. None
-of these responses authorizes zero substitution. Endpoint proof reads still
-require their own current, matching confirmations.
+The legacy copy and rescue workflow uses `dvd-recovery-v2`. A completed READ(10)
+with CHECK CONDITION, valid target completion, and deferred medium sense enters
+the same bounded retry and range-splitting workflow as a current medium error.
+Only an individual requested sector that still yields no data after its retries
+becomes an unresolved placeholder. The worker continues to later source regions.
+This is evidence of unsuccessful reads, not proof of permanent physical damage
+or a failing LBA supplied by the drive.
+
+The helper leaves accepted bytes in the image and advances from its in-memory
+copy position. It retries the exact requested LBA and block count before
+splitting. If individual retries exhaust their budget and the sector remains
+unresolved, `deferredSenseBitmapHex` records that an individual read at that
+request address yielded deferred sense. The bitmap is a subset of the unresolved
+map. It records an observation about the request, while the original failure
+location remains unknown. A resumed rescue carries this evidence forward only
+for sectors that remain unresolved. V1 rescue maps remain readable and preserve
+their policy version.
+
+Standalone source reads, endpoint proofs, and the dormant `dvd-initial-copy-v1`
+evidence contract keep their stricter rules. A first read with no accepted image
+data may receive one absolute repeat; later or repeated deferred sense remains
+terminal in those paths. Deferred sense is never relabeled as current sense.
 
 ### Parser decision matrix
 
@@ -75,7 +93,7 @@ require their own current, matching confirmations.
 | Descriptor `72h` or `73h` | Four captured bytes are enough for response, key, ASC, and ASCQ; byte 7 is needed only to walk descriptors | No descriptor scan when the eight-byte header is incomplete | Unsupported response or fewer than four bytes for a classification that needs ASCQ |
 | Descriptor list | Bound by `min(captured, 8 + additional_length)`; skip each complete unneeded, unknown, or vendor descriptor | A truncated tail or descriptor overrun makes location parsing incomplete | Never erase core fields already decoded from bytes 0 to 3 |
 | Information descriptor | Type `00h`, additional length `0Ah`, reserved bits clear, one instance, VALID set | Any failed check makes location absent | Never erase core classification |
-| Deferred response | Decode for evidence | Location cannot refer to the current READ(10) | Always terminal for recovery, split, zero substitution, and boundary proof |
+| Deferred response | Decode for evidence; the V2 copy/rescue policy may retry an unreturned request and record unresolved sectors | No failing-location or endpoint proof | General classifier remains terminal; only legacy copy and rescue use deferred medium sense to retry |
 
 The matrix deliberately distinguishes a malformed optional suffix from an undecodable sense record. A malformed information descriptor cannot safely locate a sector, but it cannot change a current `MEDIUM ERROR` header into something else.
 
@@ -87,7 +105,7 @@ Apply precedence in this order:
 2. A driver base status other than `00h` or `08h` is terminal. Preserve its raw value in evidence.
 3. A device status other than masked CHECK CONDITION is terminal `unknown` unless a separate status category is added.
 4. Decode fixed or descriptor sense incrementally. Require only the bytes needed by the field being read. Preserve whether the response is current, whether the record was truncated, and whether an information LBA is valid.
-5. Deferred sense is terminal and must not enter range recovery.
+5. The general classifier keeps deferred sense terminal and unlocated. The V2 copy/rescue operation may retry the outstanding request and records deferred observations on individual unresolved sectors.
 6. Current sense key `03h` from READ(10) is a recoverable medium error, regardless of ASC/ASCQ. This covers standard `11h` read errors, `3/02/00`, and vendor detail while keeping recovery bounded by the existing retry, split, and zero-substitution policy.
 7. Current sense key `02h` is `not_ready`. Keep it terminal unless a separate bounded delay-and-retry state is added. `2/04/07` and `2/04/08` are temporary according to MMC, but treating them as medium damage would eventually write zeros for an undamaged disc.
 8. Sense keys `04h`, `06h`, and `07h` remain `hardware_error`, `unit_attention`, and `protection_error`.
@@ -125,7 +143,9 @@ Keep malformed buffers terminal, but move these currently rejected cases into ac
 - descriptor VALID clear, missing information descriptor, malformed information descriptor, and out-of-request information LBA, all classified as unlocated medium errors;
 - fixed and descriptor `03/02/00`, with transient recovery and persistent single-sector recovery cases;
 - every current `03h` sense with an unfamiliar or vendor ASC/ASCQ, proving that detail does not gate recovery;
-- deferred `71h` and `73h` medium sense, proving that only the first fresh-image read can obtain current data or sense with one repeat, while later or repeated deferred sense cannot trigger splitting, zero substitution, or boundary proof;
+- deferred `71h` and `73h` medium sense after progress, retry of the original request, subdivision, exact unresolved maps, preservation of earlier and later bytes, and no prefix rewind;
+- distinct deferred observations in the unresolved map, including rescue resume and independently proven corrected boundaries;
+- standalone, endpoint, and initial-evidence reads, retaining their stricter current-sense requirements;
 - CHECK CONDITION with legal vendor status bits set;
 - descriptor and fixed SDAT_OVFL;
 - `05/6F/06` through `05/6F/0A` as protection failures;

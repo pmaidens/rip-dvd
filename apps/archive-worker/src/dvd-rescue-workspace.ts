@@ -11,16 +11,20 @@ import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
   createDvdRecoveryProtocolPayload,
+  isDvdRecoveryPolicyVersion,
   isProvenDvdBoundaryCandidate,
   type DamagedDvdRecoveryResult,
   type DvdRecoveryResult,
+  type DvdRecoveryPolicyVersion,
   type DvdRecoveryProtocolPayload,
   type OutOfRangeDvdReadFailureResult,
   parseDvdReadFailureResultProtocol,
   parseDvdRecoveryResultProtocol,
+  retainDvdDeferredSense,
 } from "./dvd-recovery-contracts.js";
 
-const MAX_RESCUE_MAP_BYTES = 1_200_000;
+// A 9 GB DVD needs up to two sector bitmaps of about 1.1 MB each in hex.
+const MAX_RESCUE_MAP_BYTES = 2_300_000;
 const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
@@ -67,12 +71,13 @@ export interface DvdRescueWorkspace {
   imageProofIdentity: ImageProofIdentity | null;
   imagePath: string;
   mapPath: string;
+  recoveryPolicyVersion?: DvdRecoveryPolicyVersion;
   recoveryResult: DvdRecoveryResult | null;
 }
 
 type DvdRescueState = Pick<
   DvdRescueWorkspace,
-  "boundaryFailure" | "imageByteCount" | "recoveryResult"
+  "boundaryFailure" | "imageByteCount" | "recoveryPolicyVersion" | "recoveryResult"
 >;
 
 interface DvdRescueMap {
@@ -82,7 +87,7 @@ interface DvdRescueMap {
   declaredByteCount: number;
   sectorSizeBytes: typeof DVD_SECTOR_SIZE_BYTES;
   totalSectorCount: number;
-  recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
+  recoveryPolicyVersion: DvdRecoveryPolicyVersion;
   imageByteCount?: number;
   imageFilesystemIdentity: string;
   preparedImageBasename?: string;
@@ -588,7 +593,7 @@ function rescueStateFromMap(
     !("totalSectorCount" in value) ||
     value.totalSectorCount !== identity.sizeBytes / DVD_SECTOR_SIZE_BYTES ||
     !("recoveryPolicyVersion" in value) ||
-    value.recoveryPolicyVersion !== DVD_RECOVERY_POLICY_VERSION ||
+    !isDvdRecoveryPolicyVersion(value.recoveryPolicyVersion) ||
     !("imageFilesystemIdentity" in value) ||
     typeof value.imageFilesystemIdentity !== "string" ||
     !("recoveryProtocol" in value)
@@ -596,6 +601,13 @@ function rescueStateFromMap(
     throw new Error("DVD rescue state is invalid");
   }
   const map = value as DvdRescueMap;
+  if (
+    map.recoveryProtocol !== null &&
+    (typeof map.recoveryProtocol !== "object" ||
+      map.recoveryProtocol.recoveryPolicyVersion !== map.recoveryPolicyVersion)
+  ) {
+    throw new Error("DVD rescue state is invalid");
+  }
   parseBoundaryAcceptanceImageProof(map);
   const correctedRetryProof = parseCorrectedRetryRetainedSectorProof(map);
   if (map.schemaVersion === 1) {
@@ -669,6 +681,9 @@ function rescueStateFromMap(
   return {
     boundaryFailure,
     imageByteCount: map.imageByteCount!,
+    ...(map.recoveryProtocol === null
+      ? { recoveryPolicyVersion: map.recoveryPolicyVersion }
+      : {}),
     recoveryResult: map.recoveryProtocol === null
       ? null
       : parseDvdRecoveryResultProtocol(
@@ -747,7 +762,10 @@ function createRescueMap(
     declaredByteCount: identity.sizeBytes,
     sectorSizeBytes: DVD_SECTOR_SIZE_BYTES,
     totalSectorCount: identity.sizeBytes / DVD_SECTOR_SIZE_BYTES,
-    recoveryPolicyVersion: DVD_RECOVERY_POLICY_VERSION,
+    recoveryPolicyVersion:
+      state.recoveryResult?.recoveryPolicyVersion ??
+      state.recoveryPolicyVersion ??
+      DVD_RECOVERY_POLICY_VERSION,
     ...(state.boundaryFailure === null
       ? {}
       : {
@@ -817,9 +835,23 @@ function composeBoundaryCandidateWithPriorSuffix(
       normalizedRanges.push(range);
     }
   }
+  const recoveryPolicyVersion =
+    prior?.recoveryPolicyVersion === DVD_RECOVERY_POLICY_VERSION
+      ? DVD_RECOVERY_POLICY_VERSION
+      : candidate.recoveryPolicyVersion;
   return normalizedRanges.length === 0
-    ? createCleanDvdRecoveryResult(declaredByteCount)
-    : createDamagedDvdRecoveryResult(declaredByteCount, normalizedRanges);
+    ? createCleanDvdRecoveryResult(declaredByteCount, recoveryPolicyVersion)
+    : retainDvdDeferredSense(
+        retainDvdDeferredSense(
+          createDamagedDvdRecoveryResult(
+            declaredByteCount,
+            normalizedRanges,
+            recoveryPolicyVersion,
+          ),
+          candidate,
+        ),
+        prior,
+      );
 }
 
 function requirePreparedImagePath(
@@ -1769,6 +1801,13 @@ export async function prepareDvdBoundaryRescueWorkspace(
   identity: DvdRescueIdentity,
   workspace: DvdRescueWorkspace,
   boundaryFailure: OutOfRangeDvdReadFailureResult,
+  {
+    observedRecoveryResult,
+    authorizeMutation,
+  }: {
+    observedRecoveryResult: DvdRecoveryResult | null;
+    authorizeMutation: AuthorizeMutation;
+  },
 ): Promise<DvdRescueWorkspace> {
   const expectedPaths = dvdRescueWorkspacePaths(
     root,
@@ -1792,12 +1831,45 @@ export async function prepareDvdBoundaryRescueWorkspace(
   ) {
     throw new Error("DVD rescue image changed during boundary retention");
   }
-  return {
+  const preparedWorkspace = {
     ...workspace,
     boundaryFailure,
     imageByteCount: imageMetadata.size,
     imageProofIdentity: null,
   };
+  if (
+    observedRecoveryResult?.outcome !== "damaged" ||
+    observedRecoveryResult.deferredSenseSectorRanges === undefined
+  ) {
+    return preparedWorkspace;
+  }
+
+  // Preserve a validated snapshot of a newly extended prefix. If a damaged
+  // map already covers the image, keep its unresolved set until acceptance.
+  let retainedState: DvdRescueState;
+  if (continuesBoundaryPrefix) {
+    retainedState = {
+      ...preparedWorkspace,
+      recoveryResult: observedRecoveryResult,
+    };
+  } else if (workspace.recoveryResult?.outcome === "damaged") {
+    retainedState = {
+      ...workspace,
+      recoveryResult: retainDvdDeferredSense(
+        workspace.recoveryResult,
+        observedRecoveryResult,
+      ),
+    };
+  } else {
+    return preparedWorkspace;
+  }
+  await writeMapAtomically(
+    root,
+    workspace.mapPath,
+    createRescueMap(identity, workspace.imageFilesystemIdentity, retainedState),
+    authorizeMutation,
+  );
+  return { ...preparedWorkspace, recoveryResult: retainedState.recoveryResult };
 }
 
 export async function acceptDvdBoundaryRescueWorkspace(

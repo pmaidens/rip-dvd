@@ -29,7 +29,7 @@
 #define MAX_DVD_CONTENT_BYTES UINT64_C(9000000000)
 #define PROGRESS_INTERVAL_BYTES UINT64_C(67108864)
 #define PROGRESS_INTERVAL_NS INT64_C(1000000000)
-#define RECOVERY_POLICY_VERSION "dvd-recovery-v1"
+#define RECOVERY_POLICY_VERSION "dvd-recovery-v2"
 #define RECOVERY_RESULT_PREFIX "rip-dvd-recovery-result "
 #define INITIAL_COPY_POLICY_VERSION "dvd-initial-copy-v1"
 #define INITIAL_COPY_RESULT_PREFIX "rip-dvd-initial-copy-result "
@@ -124,6 +124,7 @@ static int descriptor_holds_exclusive_flock(int descriptor) {
 enum backend_read_status {
     BACKEND_READ_SUCCESS,
     BACKEND_READ_MEDIUM_ERROR,
+    BACKEND_READ_DEFERRED_MEDIUM_ERROR,
     BACKEND_READ_TERMINAL_FAILURE,
     BACKEND_READ_OUT_OF_RANGE_ERROR,
     BACKEND_READ_END,
@@ -213,9 +214,11 @@ struct operation_state {
 
 struct recovery_state {
     unsigned char *bad_sector_bitmap;
+    unsigned char *deferred_sense_bitmap;
     size_t bitmap_byte_count;
     uint64_t bad_sector_count;
     uint64_t bad_area_count;
+    int has_deferred_sense_sectors;
     int allow_boundary_proof;
     int include_boundary_recovery_snapshot;
     int boundary_failure;
@@ -731,6 +734,18 @@ static int write_terminal_output(const char *output, size_t length)
     return 0;
 }
 
+static char *append_bitmap_hex(char *output, const unsigned char *bitmap,
+                               size_t byte_count)
+{
+    static const char hex_digits[] = "0123456789abcdef";
+    for (size_t index = 0; index < byte_count; index++) {
+        unsigned char byte = bitmap[index];
+        *output++ = hex_digits[byte >> 4];
+        *output++ = hex_digits[byte & 0x0f];
+    }
+    return output;
+}
+
 static int emit_read_failure_result(
     const struct read_failure *failure, struct recovery_state *recovery,
     uint64_t declared_byte_count, uint64_t retained_image_byte_count)
@@ -829,13 +844,15 @@ static int emit_read_failure_result(
         fprintf(stderr, "DVD read failure result exceeded its bound\n");
         return 1;
     }
-    if (includes_recovery_snapshot &&
-        recovery->bitmap_byte_count > (SIZE_MAX - 2048) / 2) {
+    size_t bitmap_count = includes_recovery_snapshot
+        ? 1 + recovery->has_deferred_sense_sectors : 0;
+    if (bitmap_count > 0 &&
+        recovery->bitmap_byte_count > (SIZE_MAX - 2048) / (2 * bitmap_count)) {
         fprintf(stderr, "DVD read failure result exceeded its bound\n");
         return 1;
     }
     size_t output_capacity = 2048 +
-        (includes_recovery_snapshot ? recovery->bitmap_byte_count * 2 : 0);
+        (bitmap_count > 0 ? recovery->bitmap_byte_count * 2 * bitmap_count : 0);
     char *output = malloc(output_capacity);
     if (output == NULL) {
         fprintf(stderr, "DVD read failure result allocation failed\n");
@@ -865,20 +882,20 @@ static int emit_read_failure_result(
     }
     size_t output_length = (size_t)formatted_length;
     if (includes_recovery_snapshot) {
-        static const char hex_digits[] = "0123456789abcdef";
-        size_t offset = output_length;
+        char *end = output + output_length;
         if (recovery->bad_sector_count > 0) {
-            for (size_t index = 0;
-                 index < recovery->bitmap_byte_count; index++) {
-                unsigned char byte = recovery->bad_sector_bitmap[index];
-                output[offset++] = hex_digits[byte >> 4];
-                output[offset++] = hex_digits[byte & 0x0f];
-            }
+            end = append_bitmap_hex(end, recovery->bad_sector_bitmap,
+                                    recovery->bitmap_byte_count);
         }
-        memcpy(output + offset, "\"}}\n", 4);
-        offset += 4;
-        output[offset] = '\0';
-        output_length = offset;
+        if (recovery->has_deferred_sense_sectors) {
+            static const char field[] = "\",\"deferredSenseBitmapHex\":\"";
+            memcpy(end, field, sizeof(field) - 1);
+            end += sizeof(field) - 1;
+            end = append_bitmap_hex(end, recovery->deferred_sense_bitmap,
+                                    recovery->bitmap_byte_count);
+        }
+        memcpy(end, "\"}}\n", 5);
+        output_length = (size_t)(end - output) + 4;
     }
 #ifdef RIP_DVD_READER_TESTING
     if (recovery != NULL && recovery->interrupt_read_failure_result) {
@@ -1165,8 +1182,7 @@ static struct backend_read_result backend_read(
     };
 }
 
-/* A deferred error can implicate previously accepted content. Only the first
- * read of a fresh image can be repeated without leaving that data unverified. */
+/* The hash and initial-copy contracts allow one repeat before accepting data. */
 static struct backend_read_result read_initial_content_with_deferred_retry(
     struct read_backend *backend, unsigned char *buffer, uint64_t lba,
     int block_count, int absolute, uint32_t *retry_ordinal)
@@ -1178,6 +1194,21 @@ static struct backend_read_result read_initial_content_with_deferred_retry(
         *retry_ordinal += 1;
         result = backend_read(
             backend, buffer, lba, block_count, 1, *retry_ordinal);
+    }
+    return result;
+}
+
+/* Retry the unreturned request without using deferred sense to locate damage
+ * or to prove a boundary. Standalone and endpoint reads use backend_read. */
+static struct backend_read_result recovery_read(
+    struct read_backend *backend, unsigned char *buffer, uint64_t lba, int block_count, int absolute,
+    uint32_t retry_ordinal)
+{
+    struct backend_read_result result = backend_read(
+        backend, buffer, lba, block_count, absolute, retry_ordinal);
+    if (result.status == BACKEND_READ_TERMINAL_FAILURE &&
+        has_deferred_medium_sense(&result.failure)) {
+        result.status = BACKEND_READ_DEFERRED_MEDIUM_ERROR;
     }
     return result;
 }
@@ -1199,12 +1230,18 @@ static int sector_is_bad(const struct recovery_state *recovery, uint64_t lba)
             (unsigned char)(1U << bit_index)) != 0;
 }
 
-static void mark_bad_sector(struct recovery_state *recovery, uint64_t lba)
+static void mark_bad_sector(struct recovery_state *recovery, uint64_t lba,
+                            int yielded_deferred_sense)
 {
     size_t byte_index = (size_t)(lba / 8);
     unsigned int bit_index = (unsigned int)(lba % 8);
     recovery->bad_sector_bitmap[byte_index] |=
         (unsigned char)(1U << bit_index);
+    if (yielded_deferred_sense) {
+        recovery->deferred_sense_bitmap[byte_index] |=
+            (unsigned char)(1U << bit_index);
+        recovery->has_deferred_sense_sectors = 1;
+    }
     recovery->bad_sector_count += 1;
     if (lba == 0 || !sector_is_bad(recovery, lba - 1)) {
         recovery->bad_area_count += 1;
@@ -1438,6 +1475,8 @@ static const char *endpoint_probe_failure_name(
     switch (result->status) {
     case BACKEND_READ_SUCCESS:
         return "readable_data";
+    case BACKEND_READ_DEFERRED_MEDIUM_ERROR:
+        return "unknown";
     case BACKEND_READ_MEDIUM_ERROR:
         return "medium_error";
     case BACKEND_READ_TERMINAL_FAILURE:
@@ -1701,12 +1740,13 @@ static int recover_range(struct read_backend *backend,
                          unsigned char *buffer, uint64_t start_lba,
                          int block_count, uint64_t *bytes_processed,
                          uint32_t first_retry_ordinal,
+                         int yielded_deferred_sense,
                          uint64_t declared_byte_count)
 {
     for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
         struct backend_read_result result =
-            backend_read(backend, buffer, start_lba, block_count, 1,
-                         first_retry_ordinal + (uint32_t)attempt);
+            recovery_read(backend, buffer, start_lba, block_count, 1,
+                          first_retry_ordinal + (uint32_t)attempt);
         if (result.status == BACKEND_READ_FATAL) {
             return 1;
         }
@@ -1717,6 +1757,10 @@ static int recover_range(struct read_backend *backend,
         }
         if (result.status == BACKEND_READ_MEDIUM_ERROR) {
             record_boundary_medium_error(conflict_evidence, &result.failure);
+            continue;
+        }
+        if (result.status == BACKEND_READ_DEFERRED_MEDIUM_ERROR) {
+            yielded_deferred_sense = 1;
             continue;
         }
         if (backend_read_has_terminal_failure_result(result.status)) {
@@ -1749,7 +1793,7 @@ static int recover_range(struct read_backend *backend,
                              buffer,
                              start_lba + (uint64_t)result.blocks_read,
                              block_count - result.blocks_read,
-                             bytes_processed, 0, declared_byte_count);
+                             bytes_processed, 0, 0, declared_byte_count);
     }
 
     if (block_count == 1) {
@@ -1757,21 +1801,21 @@ static int recover_range(struct read_backend *backend,
         if (consume_blocks(state, buffer, 1, bytes_processed) != 0) {
             return 1;
         }
-        mark_bad_sector(recovery, start_lba);
+        mark_bad_sector(recovery, start_lba, yielded_deferred_sense);
         return 0;
     }
 
     int left_block_count = block_count / 2;
     int left_status = recover_range(
         backend, state, recovery, conflict_evidence, buffer,
-        start_lba, left_block_count, bytes_processed, 0,
+        start_lba, left_block_count, bytes_processed, 0, 0,
         declared_byte_count);
     if (left_status != 0) {
         return left_status;
     }
     return recover_range(backend, state, recovery, conflict_evidence, buffer,
                          start_lba + (uint64_t)left_block_count,
-                         block_count - left_block_count, bytes_processed, 0,
+                         block_count - left_block_count, bytes_processed, 0, 0,
                          declared_byte_count);
 }
 
@@ -1799,12 +1843,18 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                             : (int)blocks_remaining;
         uint64_t start_lba = bytes_processed / DVDCSS_BLOCK_SIZE;
         uint32_t retry_ordinal = 0;
-        struct backend_read_result result = bytes_processed == 0
-            ? read_initial_content_with_deferred_retry(
+        struct backend_read_result result;
+        if (recovery != NULL && initial_copy == NULL) {
+            result = recovery_read(backend, buffer, start_lba, requested,
+                                   require_absolute_read, 0);
+        } else if (bytes_processed == 0) {
+            result = read_initial_content_with_deferred_retry(
                 backend, buffer, start_lba, requested,
-                require_absolute_read, &retry_ordinal)
-            : backend_read(backend, buffer, start_lba, requested,
-                           require_absolute_read, 0);
+                require_absolute_read, &retry_ordinal);
+        } else {
+            result = backend_read(backend, buffer, start_lba, requested,
+                                  require_absolute_read, 0);
+        }
         require_absolute_read = 0;
         if (result.status == BACKEND_READ_FATAL) {
             status = 1;
@@ -1816,7 +1866,8 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             status = 1;
             break;
         }
-        if (result.status == BACKEND_READ_MEDIUM_ERROR) {
+        if (result.status == BACKEND_READ_MEDIUM_ERROR ||
+            result.status == BACKEND_READ_DEFERRED_MEDIUM_ERROR) {
             if (initial_copy != NULL) {
                 status = skip_initial_copy_request(
                     state, initial_copy, &result.failure, buffer,
@@ -1833,12 +1884,17 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                 break;
             }
             struct boundary_conflict_evidence conflict_evidence = { 0 };
-            record_boundary_medium_error(
-                &conflict_evidence, &result.failure);
+            if (result.status == BACKEND_READ_MEDIUM_ERROR) {
+                record_boundary_medium_error(
+                    &conflict_evidence, &result.failure);
+            }
             int recovery_status = recover_range(
                 backend, state, recovery, &conflict_evidence, buffer,
                 start_lba, requested,
-                &bytes_processed, retry_ordinal + 1, size_bytes);
+                &bytes_processed, retry_ordinal + 1,
+                requested == 1 &&
+                    result.status == BACKEND_READ_DEFERRED_MEDIUM_ERROR,
+                size_bytes);
             if (recovery_status != 0) {
                 status = recovery_status;
                 break;
@@ -1994,6 +2050,12 @@ static int emit_recovery_result(uint64_t size_bytes,
             fprintf(stderr, "%02x", recovery->bad_sector_bitmap[index]);
         }
     }
+    if (recovery->has_deferred_sense_sectors) {
+        fprintf(stderr, "\",\"deferredSenseBitmapHex\":\"");
+        for (size_t index = 0; index < recovery->bitmap_byte_count; index++) {
+            fprintf(stderr, "%02x", recovery->deferred_sense_bitmap[index]);
+        }
+    }
     fprintf(stderr, "\"}\n");
     return ferror(stderr) == 0 ? 0 :
         fail_errno("DVD recovery result output failed");
@@ -2084,7 +2146,7 @@ static int run_copy(struct read_backend *backend, const char *output_path,
     }
     uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
     size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
-    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 1);
+    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 2);
     if (bad_sector_bitmap == NULL) {
         close(output_fd);
         fprintf(stderr, "DVD recovery map allocation failed\n");
@@ -2092,6 +2154,7 @@ static int run_copy(struct read_backend *backend, const char *output_path,
     }
     struct recovery_state recovery = {
         .bad_sector_bitmap = bad_sector_bitmap,
+        .deferred_sense_bitmap = bad_sector_bitmap + bitmap_byte_count,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
@@ -2308,7 +2371,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
     }
     uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
     size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
-    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 1);
+    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 2);
     void *allocation = NULL;
     if (bad_sector_bitmap == NULL ||
         posix_memalign(&allocation, DVDCSS_BLOCK_SIZE, DVDCSS_BLOCK_SIZE) != 0) {
@@ -2320,6 +2383,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
     unsigned char *buffer = allocation;
     struct recovery_state recovery = {
         .bad_sector_bitmap = bad_sector_bitmap,
+        .deferred_sense_bitmap = bad_sector_bitmap + bitmap_byte_count,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
@@ -2355,11 +2419,12 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             continue;
         }
         int recovered = 0;
+        int yielded_deferred_sense = 0;
         struct boundary_conflict_evidence conflict_evidence = { 0 };
         for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
             struct backend_read_result result =
-                backend_read(backend, buffer, lba, 1, 1,
-                             (uint32_t)attempt);
+                recovery_read(backend, buffer, lba, 1, 1,
+                              (uint32_t)attempt);
             if (result.status == BACKEND_READ_FATAL) {
                 status = 1;
                 break;
@@ -2373,6 +2438,10 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             if (result.status == BACKEND_READ_MEDIUM_ERROR) {
                 record_boundary_medium_error(
                     &conflict_evidence, &result.failure);
+                continue;
+            }
+            if (result.status == BACKEND_READ_DEFERRED_MEDIUM_ERROR) {
+                yielded_deferred_sense = 1;
                 continue;
             }
             if (backend_read_has_terminal_failure_result(result.status)) {
@@ -2416,7 +2485,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
                 status = 1;
                 break;
             }
-            mark_bad_sector(&recovery, lba);
+            mark_bad_sector(&recovery, lba, yielded_deferred_sense);
         }
         bytes_processed += DVDCSS_BLOCK_SIZE;
         if (emit_copy_progress(bytes_processed, &last_progress_bytes,
@@ -2487,7 +2556,7 @@ static int run_boundary_resume(
     }
     uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
     size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
-    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 1);
+    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 2);
     if (bad_sector_bitmap == NULL) {
         close(output_fd);
         fprintf(stderr, "DVD boundary rescue map allocation failed\n");
@@ -2495,6 +2564,7 @@ static int run_boundary_resume(
     }
     struct recovery_state recovery = {
         .bad_sector_bitmap = bad_sector_bitmap,
+        .deferred_sense_bitmap = bad_sector_bitmap + bitmap_byte_count,
         .bitmap_byte_count = bitmap_byte_count,
         .allow_boundary_proof = 1,
         .emit_malformed_result =
