@@ -1328,7 +1328,7 @@ describe("archive worker polling", () => {
       boundaryReadFailureAsc: 33,
       boundaryReadFailureAscq: 0,
       integrity: "clean_read",
-      integrityPolicyVersion: "dvd-recovery-v1",
+      integrityPolicyVersion: "dvd-recovery-v2",
       badSectorCount: 0,
       badAreaCount: 0,
       badSectorRanges: [],
@@ -3798,7 +3798,7 @@ describe("archive worker polling", () => {
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
     expect(archive).toMatchObject({
       integrity: "clean_read",
-      integrityPolicyVersion: "dvd-recovery-v1",
+      integrityPolicyVersion: "dvd-recovery-v2",
       badSectorCount: 0,
       badAreaCount: 0,
       badSectorRanges: [],

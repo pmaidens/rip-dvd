@@ -161,7 +161,7 @@ function emitCleanRecoveryProtocol(
         protocolVersion: 1,
         declaredByteCount,
         recoveredByteCount: declaredByteCount,
-        recoveryPolicyVersion: "dvd-recovery-v1",
+        recoveryPolicyVersion: "dvd-recovery-v2",
         badSectorCount: 0,
         badAreaCount: 0,
         badSectorBitmapHex: "",
@@ -1150,7 +1150,7 @@ describe("DVD archive publication", () => {
           protocolVersion: 1,
           declaredByteCount: sizeBytes,
           recoveredByteCount: 2 * 2_048,
-          recoveryPolicyVersion: "dvd-recovery-v1",
+          recoveryPolicyVersion: "dvd-recovery-v2",
           badSectorCount: 2,
           badAreaCount: 1,
           badSectorBitmapHex: "06",
@@ -1434,7 +1434,7 @@ describe("DVD archive publication", () => {
             protocolVersion: 1,
             declaredByteCount: sizeBytes,
             recoveredByteCount: sizeBytes - 2_048,
-            recoveryPolicyVersion: "dvd-recovery-v1",
+            recoveryPolicyVersion: "dvd-recovery-v2",
             badSectorCount: 1,
             badAreaCount: 1,
             badSectorBitmapHex: "2000000000",
@@ -1654,7 +1654,7 @@ describe("DVD archive publication", () => {
           protocolVersion: 1,
           declaredByteCount: 4 * 2_048,
           recoveredByteCount: 4 * 2_048,
-          recoveryPolicyVersion: "dvd-recovery-v1",
+          recoveryPolicyVersion: "dvd-recovery-v2",
           badSectorCount: 0,
           badAreaCount: 0,
           badSectorBitmapHex: "",
@@ -2827,7 +2827,7 @@ describe("DVD archive publication", () => {
       archiveFilesystemIdentity: expect.stringMatching(/^\d+:[1-9]\d*$/),
       integrityEvidence: {
         integrity: "clean_read",
-        policyVersion: "dvd-recovery-v1",
+        policyVersion: "dvd-recovery-v2",
         badSectorCount: 0,
         badAreaCount: 0,
         badSectorRanges: [],
@@ -3935,7 +3935,7 @@ describe("DVD archive publication", () => {
       protocolVersion: 1,
       declaredByteCount: fixture.rescuedImage.byteLength,
       recoveredByteCount: fixture.rescuedImage.byteLength,
-      recoveryPolicyVersion: "dvd-recovery-v1",
+      recoveryPolicyVersion: "dvd-recovery-v2",
       badSectorCount: 0,
       badAreaCount: 0,
       badSectorBitmapHex: "",
@@ -4379,7 +4379,7 @@ describe("DVD archive publication", () => {
       protocolVersion: 1,
       declaredByteCount: sizeBytes,
       recoveredByteCount: sizeBytes,
-      recoveryPolicyVersion: "dvd-recovery-v1",
+      recoveryPolicyVersion: "dvd-recovery-v2",
       badSectorCount: 0,
       badAreaCount: 0,
       badSectorBitmapHex: "",
@@ -4646,7 +4646,7 @@ describe("DVD archive publication", () => {
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
   });
 
-  it("resumes a corrected publication after a worker restart", async () => {
+  it.each([2, 3])("resumes a V1 corrected publication from schema %i after restart", async (schemaVersion) => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const digest = "7".repeat(64);
@@ -4684,10 +4684,14 @@ describe("DVD archive publication", () => {
       verifySource: async () => undefined,
       onProgress: () => undefined,
     };
-    const first = await preserveDvdArchive({
+    const proofInterrupted = new Error("worker stopped during completeness proof");
+    const first = preserveDvdArchive({
       ...baseOptions,
       completenessProver: {
         async prove() {
+          if (schemaVersion === 2) {
+            throw proofInterrupted;
+          }
           return { maximumReferencedLba: firstExcludedLba - 1 };
         },
       },
@@ -4702,9 +4706,22 @@ describe("DVD archive publication", () => {
       },
     });
     const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
-    expect(readFileSync(first.archivePath)).toEqual(retainedPrefix);
-    expect(existsSync(rescuePaths.imagePath)).toBe(true);
-    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    let firstFilesystemIdentity: string | undefined;
+    if (schemaVersion === 2) {
+      await expect(first).rejects.toBe(proofInterrupted);
+    } else {
+      const published = await first;
+      expect(readFileSync(published.archivePath)).toEqual(retainedPrefix);
+      firstFilesystemIdentity = published.archiveFilesystemIdentity;
+    }
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(retainedPrefix);
+    const map = JSON.parse(readFileSync(rescuePaths.mapPath, "utf8"));
+    expect(map.schemaVersion).toBe(schemaVersion);
+    map.recoveryPolicyVersion = "dvd-recovery-v1";
+    if (map.recoveryProtocol !== null) {
+      map.recoveryProtocol.recoveryPolicyVersion = "dvd-recovery-v1";
+    }
+    writeFileSync(rescuePaths.mapPath, JSON.stringify(map));
 
     const retryCopy = vi.fn();
     const retryProof = vi.fn(async () => ({
@@ -4723,8 +4740,19 @@ describe("DVD archive publication", () => {
 
     expect(retryCopy).not.toHaveBeenCalled();
     expect(retryProof).toHaveBeenCalledOnce();
-    expect(restarted.archiveFilesystemIdentity)
-      .toBe(first.archiveFilesystemIdentity);
+    if (firstFilesystemIdentity !== undefined) {
+      expect(restarted.archiveFilesystemIdentity).toBe(firstFilesystemIdentity);
+    }
+    expect(restarted.integrityEvidence).toMatchObject({
+      integrity: "clean_read",
+      policyVersion: "dvd-recovery-v1",
+    });
+    expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
+      .toMatchObject({
+        schemaVersion: 3,
+        recoveryPolicyVersion: "dvd-recovery-v1",
+        recoveryProtocol: { recoveryPolicyVersion: "dvd-recovery-v1" },
+      });
     expect(restarted.correctedBoundaryEvidence).toMatchObject({
       reportedSizeBytes,
       publishedSizeBytes: retainedPrefix.byteLength,
@@ -4754,10 +4782,12 @@ describe("DVD archive publication", () => {
         { startLba: 1, sectorCount: 1 },
         { startLba: 7, sectorCount: 1 },
       ],
+      "dvd-recovery-v1",
     );
     const retainedDamage = createDamagedDvdRecoveryResult(
       reportedSizeBytes,
       [{ startLba: 1, sectorCount: 1 }],
+      "dvd-recovery-v1",
     );
     const boundaryFailure = createProvenBoundaryFailure(
       reportedSizeBytes,
@@ -4880,11 +4910,12 @@ describe("DVD archive publication", () => {
       fullImage.subarray(0, publishedSizeBytes),
     );
     expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
-      .toMatchObject({ schemaVersion: 2 });
+      .toMatchObject({ schemaVersion: 2, recoveryPolicyVersion: "dvd-recovery-v1" });
     expect(JSON.parse(readFileSync(retentionMapPath, "utf8")))
       .toMatchObject({
         schemaVersion: 3,
         imageByteCount: publishedSizeBytes,
+        recoveryPolicyVersion: "dvd-recovery-v1",
         boundaryAcceptanceImageProof: {
           source: {
             ctimeNs: expect.any(String),
@@ -4904,6 +4935,7 @@ describe("DVD archive publication", () => {
         recoveryResult: createDamagedDvdRecoveryResult(
           publishedSizeBytes,
           [{ startLba: 1, sectorCount: 1 }],
+          "dvd-recovery-v1",
         ),
       });
       return createDamagedDvdRecoveryResult(

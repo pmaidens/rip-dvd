@@ -10,7 +10,16 @@ import {
 } from "@rip-dvd/data-access";
 
 export const DVD_SECTOR_SIZE_BYTES = 2_048;
-export const DVD_RECOVERY_POLICY_VERSION = "dvd-recovery-v1";
+export const DVD_RECOVERY_POLICY_VERSION = "dvd-recovery-v2";
+export type DvdRecoveryPolicyVersion =
+  | typeof DVD_RECOVERY_POLICY_VERSION
+  | "dvd-recovery-v1";
+
+export function isDvdRecoveryPolicyVersion(
+  value: unknown,
+): value is DvdRecoveryPolicyVersion {
+  return value === DVD_RECOVERY_POLICY_VERSION || value === "dvd-recovery-v1";
+}
 export const DVD_RECOVERY_RESULT_PREFIX = "rip-dvd-recovery-result ";
 export const DVD_READ_FAILURE_CLASSIFIER_VERSION =
   "scsi-read-classifier-v2";
@@ -111,7 +120,7 @@ export interface CleanDvdRecoveryResult {
   outcome: "clean";
   declaredByteCount: number;
   recoveredByteCount: number;
-  recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
+  recoveryPolicyVersion: DvdRecoveryPolicyVersion;
   badSectorCount: 0;
   badAreaCount: 0;
   unrecoveredSectorRanges: readonly [];
@@ -121,10 +130,12 @@ export interface DamagedDvdRecoveryResult {
   outcome: "damaged";
   declaredByteCount: number;
   recoveredByteCount: number;
-  recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
+  recoveryPolicyVersion: DvdRecoveryPolicyVersion;
   badSectorCount: number;
   badAreaCount: number;
   unrecoveredSectorRanges: readonly UnreadableSectorRange[];
+  /** Unresolved sectors that yielded deferred sense on an individual read. */
+  deferredSenseSectorRanges?: readonly UnreadableSectorRange[];
 }
 
 export type DvdRecoveryResult =
@@ -135,10 +146,11 @@ export interface DvdRecoveryProtocolPayload {
   protocolVersion: 1;
   declaredByteCount: number;
   recoveredByteCount: number;
-  recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
+  recoveryPolicyVersion: DvdRecoveryPolicyVersion;
   badSectorCount: number;
   badAreaCount: number;
   badSectorBitmapHex: string;
+  deferredSenseBitmapHex?: string;
 }
 
 export interface PublishableDvdValidationResult {
@@ -159,12 +171,13 @@ export type DvdValidationResult =
 
 export function createCleanDvdRecoveryResult(
   declaredByteCount: number,
+  recoveryPolicyVersion: DvdRecoveryPolicyVersion = DVD_RECOVERY_POLICY_VERSION,
 ): CleanDvdRecoveryResult {
   return {
     outcome: "clean",
     declaredByteCount,
     recoveredByteCount: declaredByteCount,
-    recoveryPolicyVersion: DVD_RECOVERY_POLICY_VERSION,
+    recoveryPolicyVersion,
     badSectorCount: 0,
     badAreaCount: 0,
     unrecoveredSectorRanges: [],
@@ -174,6 +187,8 @@ export function createCleanDvdRecoveryResult(
 export function createDamagedDvdRecoveryResult(
   declaredByteCount: number,
   unreadableSectorRanges: readonly UnreadableSectorRange[],
+  recoveryPolicyVersion: DvdRecoveryPolicyVersion = DVD_RECOVERY_POLICY_VERSION,
+  deferredSenseSectorRanges: readonly UnreadableSectorRange[] = [],
 ): DamagedDvdRecoveryResult {
   const ranges = unreadableSectorRanges.map(({ startLba, sectorCount }) => ({
     startLba,
@@ -188,10 +203,13 @@ export function createDamagedDvdRecoveryResult(
     declaredByteCount,
     recoveredByteCount:
       declaredByteCount - badSectorCount * DVD_SECTOR_SIZE_BYTES,
-    recoveryPolicyVersion: DVD_RECOVERY_POLICY_VERSION,
+    recoveryPolicyVersion,
     badSectorCount,
     badAreaCount: ranges.length,
     unrecoveredSectorRanges: ranges,
+    ...(deferredSenseSectorRanges.length > 0
+      ? { deferredSenseSectorRanges }
+      : {}),
   };
   validateDvdRecoveryResult(result, declaredByteCount);
   return result;
@@ -210,21 +228,28 @@ export function trimDvdRecoveryResult(
     throw new Error("DVD recovery boundary is invalid");
   }
   const retainedSectorCount = retainedByteCount / DVD_SECTOR_SIZE_BYTES;
-  const retainedRanges = result.unrecoveredSectorRanges.flatMap((range) => {
-    if (range.startLba >= retainedSectorCount) {
-      return [];
-    }
-    return [{
-      startLba: range.startLba,
-      sectorCount: Math.min(
-        range.startLba + range.sectorCount,
-        retainedSectorCount,
-      ) - range.startLba,
-    }];
-  });
+  const trimRanges = (ranges: readonly UnreadableSectorRange[]) =>
+    ranges.flatMap((range) => {
+      if (range.startLba >= retainedSectorCount) {
+        return [];
+      }
+      return [{
+        startLba: range.startLba,
+        sectorCount: Math.min(
+          range.startLba + range.sectorCount,
+          retainedSectorCount,
+        ) - range.startLba,
+      }];
+    });
+  const retainedRanges = trimRanges(result.unrecoveredSectorRanges);
   return retainedRanges.length === 0
-    ? createCleanDvdRecoveryResult(retainedByteCount)
-    : createDamagedDvdRecoveryResult(retainedByteCount, retainedRanges);
+    ? createCleanDvdRecoveryResult(retainedByteCount, result.recoveryPolicyVersion)
+    : createDamagedDvdRecoveryResult(
+        retainedByteCount, retainedRanges, result.recoveryPolicyVersion,
+        result.outcome === "damaged"
+          ? trimRanges(result.deferredSenseSectorRanges ?? [])
+          : [],
+      );
 }
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
@@ -482,7 +507,7 @@ function isNormalizedDamagedResult(
     result.outcome !== "damaged" ||
     result.declaredByteCount !== expectedByteCount ||
     !isSafeNonNegativeInteger(result.recoveredByteCount) ||
-    result.recoveryPolicyVersion !== DVD_RECOVERY_POLICY_VERSION ||
+    !isDvdRecoveryPolicyVersion(result.recoveryPolicyVersion) ||
     !isSafeNonNegativeInteger(result.badSectorCount) ||
     result.badSectorCount === 0 ||
     !isSafeNonNegativeInteger(result.badAreaCount) ||
@@ -518,6 +543,40 @@ function isNormalizedDamagedResult(
     previousEndLba = endLba;
     countedBadSectors += value.sectorCount;
   }
+  const deferred = result.deferredSenseSectorRanges;
+  if (deferred !== undefined) {
+    if (
+      result.recoveryPolicyVersion !== DVD_RECOVERY_POLICY_VERSION ||
+      !Array.isArray(deferred) || deferred.length === 0
+    ) {
+      return false;
+    }
+    let unresolvedIndex = 0;
+    let previousDeferredEnd = -1;
+    for (const range of deferred) {
+      if (
+        typeof range !== "object" || range === null ||
+        !isSafeNonNegativeInteger(range.startLba) ||
+        !isSafeNonNegativeInteger(range.sectorCount) || range.sectorCount === 0 ||
+        range.startLba <= previousDeferredEnd
+      ) {
+        return false;
+      }
+      previousDeferredEnd = range.startLba + range.sectorCount;
+      while (unresolvedIndex < result.unrecoveredSectorRanges.length) {
+        const unresolved = result.unrecoveredSectorRanges[unresolvedIndex]!;
+        if (range.startLba < unresolved.startLba + unresolved.sectorCount) break;
+        unresolvedIndex++;
+      }
+      const unresolved = result.unrecoveredSectorRanges[unresolvedIndex];
+      if (
+        unresolved === undefined || range.startLba < unresolved.startLba ||
+        previousDeferredEnd > unresolved.startLba + unresolved.sectorCount
+      ) {
+        return false;
+      }
+    }
+  }
   return (
     countedBadSectors === result.badSectorCount &&
     result.recoveredByteCount ===
@@ -537,16 +596,17 @@ export function validateDvdRecoveryResult(
     candidate.outcome === "clean" &&
     candidate.declaredByteCount === expectedByteCount &&
     candidate.recoveredByteCount === expectedByteCount &&
-    candidate.recoveryPolicyVersion === DVD_RECOVERY_POLICY_VERSION &&
+    isDvdRecoveryPolicyVersion(candidate.recoveryPolicyVersion) &&
     candidate.badSectorCount === 0 &&
     candidate.badAreaCount === 0 &&
+    candidate.deferredSenseSectorRanges === undefined &&
     Array.isArray(candidate.unrecoveredSectorRanges) &&
     candidate.unrecoveredSectorRanges.length === 0
   ) {
     return {
       outcome: "publish",
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
-        DVD_RECOVERY_POLICY_VERSION,
+        candidate.recoveryPolicyVersion,
       ),
     };
   }
@@ -557,6 +617,51 @@ export function validateDvdRecoveryResult(
     };
   }
   throw new Error("DVD recovery result is invalid");
+}
+
+/** Keep prior deferred observations only where the new map still has holes. */
+export function retainDvdDeferredSense(
+  result: DamagedDvdRecoveryResult,
+  prior: DvdRecoveryResult | null,
+): DamagedDvdRecoveryResult {
+  const previous = prior?.outcome === "damaged"
+    ? prior.deferredSenseSectorRanges
+    : undefined;
+  if (previous === undefined) return result;
+
+  const ranges = [...(result.deferredSenseSectorRanges ?? [])];
+  let priorIndex = 0;
+  for (const unresolved of result.unrecoveredSectorRanges) {
+    const end = unresolved.startLba + unresolved.sectorCount;
+    while (priorIndex < previous.length) {
+      const observation = previous[priorIndex]!;
+      if (observation.startLba >= end) break;
+      const observationEnd = observation.startLba + observation.sectorCount;
+      const startLba = Math.max(unresolved.startLba, observation.startLba);
+      const sectorCount = Math.min(end, observationEnd) - startLba;
+      if (sectorCount > 0) ranges.push({ startLba, sectorCount });
+      if (observationEnd > end) break;
+      priorIndex++;
+    }
+  }
+  const normalized: UnreadableSectorRange[] = [];
+  for (const range of ranges.sort((a, b) => a.startLba - b.startLba)) {
+    const last = normalized.at(-1);
+    if (last !== undefined && range.startLba <= last.startLba + last.sectorCount) {
+      last.sectorCount = Math.max(
+        last.sectorCount, range.startLba + range.sectorCount - last.startLba,
+      );
+    } else {
+      normalized.push({ ...range });
+    }
+  }
+  return normalized.length > 0
+    ? {
+        ...result,
+        recoveryPolicyVersion: DVD_RECOVERY_POLICY_VERSION,
+        deferredSenseSectorRanges: normalized,
+      }
+    : result;
 }
 
 export function validateResumedDvdRecoveryResult(
@@ -586,6 +691,10 @@ export function validateResumedDvdRecoveryResult(
         throw new Error("Resumed DVD recovery result is invalid");
       }
     }
+    return {
+      ...validation,
+      recoveryResult: retainDvdDeferredSense(validation.recoveryResult, prior),
+    };
   }
   return validation;
 }
@@ -593,9 +702,16 @@ export function validateResumedDvdRecoveryResult(
 export function formatDvdRecoveryResumeBitmap(
   result: DamagedDvdRecoveryResult,
 ): string {
-  const totalSectorCount = result.declaredByteCount / DVD_SECTOR_SIZE_BYTES;
+  return formatSectorBitmap(result.declaredByteCount, result.unrecoveredSectorRanges);
+}
+
+function formatSectorBitmap(
+  declaredByteCount: number,
+  ranges: readonly UnreadableSectorRange[],
+): string {
+  const totalSectorCount = declaredByteCount / DVD_SECTOR_SIZE_BYTES;
   const bitmap = Buffer.alloc(Math.ceil(totalSectorCount / 8));
-  for (const range of result.unrecoveredSectorRanges) {
+  for (const range of ranges) {
     for (
       let lba = range.startLba;
       lba < range.startLba + range.sectorCount;
@@ -621,6 +737,13 @@ export function createDvdRecoveryProtocolPayload(
       result.outcome === "clean"
         ? ""
         : formatDvdRecoveryResumeBitmap(result),
+    ...(result.outcome === "damaged" && result.deferredSenseSectorRanges !== undefined
+      ? {
+          deferredSenseBitmapHex: formatSectorBitmap(
+            result.declaredByteCount, result.deferredSenseSectorRanges,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -680,13 +803,17 @@ export function parseDvdRecoveryResultProtocol(
     !("recoveredByteCount" in parsed) ||
     !isSafeNonNegativeInteger(parsed.recoveredByteCount) ||
     !("recoveryPolicyVersion" in parsed) ||
-    parsed.recoveryPolicyVersion !== DVD_RECOVERY_POLICY_VERSION ||
+    !isDvdRecoveryPolicyVersion(parsed.recoveryPolicyVersion) ||
     !("badSectorCount" in parsed) ||
     !isSafeNonNegativeInteger(parsed.badSectorCount) ||
     !("badAreaCount" in parsed) ||
     !isSafeNonNegativeInteger(parsed.badAreaCount) ||
     !("badSectorBitmapHex" in parsed) ||
-    typeof parsed.badSectorBitmapHex !== "string"
+    typeof parsed.badSectorBitmapHex !== "string" ||
+    ("deferredSenseBitmapHex" in parsed &&
+      (parsed.recoveryPolicyVersion !== DVD_RECOVERY_POLICY_VERSION ||
+        typeof parsed.deferredSenseBitmapHex !== "string" ||
+        parsed.badSectorCount === 0))
   ) {
     throw new Error("DVD recovery helper result is malformed");
   }
@@ -698,7 +825,9 @@ export function parseDvdRecoveryResultProtocol(
     ) {
       throw new Error("DVD recovery helper result is malformed");
     }
-    return createCleanDvdRecoveryResult(expectedByteCount);
+    return createCleanDvdRecoveryResult(
+      expectedByteCount, parsed.recoveryPolicyVersion,
+    );
   }
   if (expectedByteCount % DVD_SECTOR_SIZE_BYTES !== 0) {
     throw new Error("DVD recovery helper result is malformed");
@@ -707,7 +836,16 @@ export function parseDvdRecoveryResultProtocol(
     parsed.badSectorBitmapHex,
     expectedByteCount / DVD_SECTOR_SIZE_BYTES,
   );
-  const result = createDamagedDvdRecoveryResult(expectedByteCount, ranges);
+  const deferred = "deferredSenseBitmapHex" in parsed &&
+    typeof parsed.deferredSenseBitmapHex === "string"
+    ? parseBadSectorBitmap(parsed.deferredSenseBitmapHex, expectedByteCount / DVD_SECTOR_SIZE_BYTES)
+    : undefined;
+  if (deferred?.length === 0) {
+    throw new Error("DVD recovery helper result is malformed");
+  }
+  const result = createDamagedDvdRecoveryResult(
+    expectedByteCount, ranges, parsed.recoveryPolicyVersion, deferred,
+  );
   if (
     result.recoveredByteCount !== parsed.recoveredByteCount ||
     result.badSectorCount !== parsed.badSectorCount ||
