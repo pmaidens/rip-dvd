@@ -1281,7 +1281,7 @@ describe("DashboardView", () => {
     await act(async () => root.unmount());
   });
 
-  it("opens a Worker Incident investigation with accessible copy and focus behavior", async () => {
+  it("opens a Worker Incident investigation from the accordion below Encode Jobs", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const writeText = vi.fn()
       .mockResolvedValueOnce(undefined)
@@ -1312,7 +1312,18 @@ describe("DashboardView", () => {
       );
     });
 
-    const trigger = [...container.querySelectorAll("button")].find(
+    const incidents = container.querySelector<HTMLDetailsElement>(
+      "details.section-accordion",
+    )!;
+    const previousCard = incidents.parentElement?.previousElementSibling;
+    expect(previousCard?.querySelector("h2")?.textContent).toBe("Encode Jobs");
+    const summary = incidents.querySelector("summary")!;
+    expect(summary.querySelector("h2")?.textContent).toBe("Worker Incidents");
+    expect(incidents.open).toBe(false);
+    await act(async () => summary.click());
+    expect(incidents.open).toBe(true);
+
+    const trigger = [...incidents.querySelectorAll("button")].find(
       (button) => button.textContent === "Investigate",
     )!;
     await act(async () => trigger.click());

@@ -1699,56 +1699,6 @@ export function DashboardView({
 
       {section === "all" || section === "encoding" ? (
         <>
-          <DashboardSection
-            title="Worker Incidents"
-            eyebrow="Worker health"
-            className="wide-section"
-            collapsible
-            state={workerIncidentState}
-            emptyMessage="No Worker Incidents are recorded."
-            renderItem={(incident) => (
-              <article className="operation-item" key={incident.id}>
-                <div className="item-heading">
-                  <div>
-                    <h3>{incident.worker}</h3>
-                    <p>{incident.phaseLabel}</p>
-                  </div>
-                  <StatusBadge value={incident.status} />
-                </div>
-                <p>
-                  {countLabel(incident.occurrenceCount, "occurrence")}
-                  {" · First observed "}
-                  {formatTimestamp(incident.firstObservedAt)}
-                  {" · Last observed "}
-                  {formatTimestamp(incident.lastObservedAt)}
-                </p>
-                {incident.resolvedAt ? (
-                  <p className="item-time">
-                    Recovered {formatTimestamp(incident.resolvedAt)}
-                  </p>
-                ) : (
-                  <p className="job-progress-detail" role="status">
-                    The {incident.worker} is retrying automatically.
-                  </p>
-                )}
-                {incident.investigation ? (
-                  <button
-                    className="investigate-action"
-                    type="button"
-                    onClick={(event) =>
-                      setActiveInvestigation({
-                        kind: "worker-incident",
-                        subjectId: incident.id,
-                        trigger: event.currentTarget,
-                        fallback: null,
-                      })}
-                  >
-                    Investigate
-                  </button>
-                ) : null}
-              </article>
-            )}
-          />
         <DashboardSection
           title="Encode Jobs"
         eyebrow="Media queue"
@@ -2067,6 +2017,56 @@ export function DashboardView({
           />
         )}
         />
+          <DashboardSection
+            title="Worker Incidents"
+            eyebrow="Worker health"
+            className="wide-section"
+            collapsible
+            state={workerIncidentState}
+            emptyMessage="No Worker Incidents are recorded."
+            renderItem={(incident) => (
+              <article className="operation-item" key={incident.id}>
+                <div className="item-heading">
+                  <div>
+                    <h3>{incident.worker}</h3>
+                    <p>{incident.phaseLabel}</p>
+                  </div>
+                  <StatusBadge value={incident.status} />
+                </div>
+                <p>
+                  {countLabel(incident.occurrenceCount, "occurrence")}
+                  {" · First observed "}
+                  {formatTimestamp(incident.firstObservedAt)}
+                  {" · Last observed "}
+                  {formatTimestamp(incident.lastObservedAt)}
+                </p>
+                {incident.resolvedAt ? (
+                  <p className="item-time">
+                    Recovered {formatTimestamp(incident.resolvedAt)}
+                  </p>
+                ) : (
+                  <p className="job-progress-detail" role="status">
+                    The {incident.worker} is retrying automatically.
+                  </p>
+                )}
+                {incident.investigation ? (
+                  <button
+                    className="investigate-action"
+                    type="button"
+                    onClick={(event) =>
+                      setActiveInvestigation({
+                        kind: "worker-incident",
+                        subjectId: incident.id,
+                        trigger: event.currentTarget,
+                        fallback: null,
+                      })}
+                  >
+                    Investigate
+                  </button>
+                ) : null}
+              </article>
+            )}
+          />
         </>
       ) : null}
 
