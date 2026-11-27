@@ -1302,6 +1302,38 @@ describe("automatic Archive Request admission", () => {
     }
   });
 
+  it("keeps the alternate disc eligible for an explicit request after cancelling reused automatic work", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, first, second } = fixture;
+    const fingerprint = `dvdmeta-sha256:${"e".repeat(64)}`;
+    try {
+      fixture.set(true);
+      fixture.insert(first, fingerprint);
+      await fixture.poll();
+      const [automatic] = access.archiveRequests.list();
+
+      fixture.eject(first);
+      fixture.insert(second, fingerprint);
+      await fixture.poll();
+      const alternate = access.catalog.listDetectedDiscs().find(({ id }) => id !== automatic!.detectedDiscId)!;
+      expect(access.archiveRequests.submit({
+        detectedDiscId: alternate.id, mutationKey: "synthetic-request-alternate-drive",
+      }).id).toBe(automatic!.id);
+      access.archiveRequests.cancel(automatic!.id);
+      await fixture.poll();
+
+      expect(access.catalog.listDetectedDiscs(undefined, { ids: [alternate.id] })[0]?.status).toBe("scanned");
+      expect(access.archiveRequests.list()).toEqual([
+        expect.objectContaining({ id: automatic!.id, origin: "automatic", status: "cancelled" }),
+      ]);
+      expect(access.archiveRequests.submit({
+        detectedDiscId: alternate.id, mutationKey: "synthetic-explicit-alternate-retry",
+      })).toMatchObject({ detectedDiscId: alternate.id, origin: "manual", status: "pending" });
+    } finally {
+      fixture.close();
+    }
+  });
+
   it.each(["cancelled", "needs_attention"] as const)(
     "keeps a %s request stopped after worker restart and reinsertion in another drive",
     async (stoppedStatus) => {

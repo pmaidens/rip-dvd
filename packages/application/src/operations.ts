@@ -985,7 +985,7 @@ function readDetail(
             visibleArchive(newArchive, evidenceHeaders)
           ),
           rearchiveRequests: access.archiveRequests
-            .listForRearchiveSources([archive.id]),
+            .listForRearchiveSources([archive.id]).map(visibleArchiveRequest),
         },
         references: {
           discSelections: discSelections.map((selection) => ({

@@ -7581,7 +7581,6 @@ export function createDataAccessInternal(
         disc.fingerprint,
         transaction,
       );
-      approveScannedDisc(transaction, disc, timestamp);
 
       const existing = transaction
         .select()
@@ -7595,6 +7594,7 @@ export function createDataAccessInternal(
         .get();
       if (existing) {
         assertDvdRecoveryEvidenceAdmissionAvailable(existing.evidenceFormat);
+        approveScannedDisc(transaction, disc, timestamp);
         return saveOutcome(
           archiveRequestWithCreationPriority(
             transaction,
@@ -7619,6 +7619,10 @@ export function createDataAccessInternal(
         assertDvdRecoveryEvidenceAdmissionAvailable(
           reusableRequest?.evidenceFormat,
         );
+        // Reusing an automatic request leaves the clicked disc eligible for later manual submission.
+        if (reusableRequest !== undefined && reusableRequest.origin !== "automatic") {
+          approveScannedDisc(transaction, disc, timestamp);
+        }
         if (reusableRequest?.status === "needs_attention") {
           return saveOutcome(
             requireRow(
@@ -7656,6 +7660,7 @@ export function createDataAccessInternal(
           );
         }
       }
+      approveScannedDisc(transaction, disc, timestamp);
       return saveOutcome(insertPendingArchiveRequest(transaction, disc.id, {
         origin: "manual",
         evidenceFormat: input.evidenceFormat ?? null,
