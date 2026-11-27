@@ -8,6 +8,7 @@ import {
   isArchiveRequestRetryable,
   parseCatalogReviewCursor,
   readCatalogReviewPage,
+  readDetectedDiscArchiveRequest,
   readMediaItemsWithAncestors,
 } from "@rip-dvd/application";
 import { createHash } from "node:crypto";
@@ -1467,10 +1468,12 @@ function readDashboardSnapshotRecords(
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];
   const relevantArchiveRequests = new Map(displayedDetectedDiscIds.map((id) => [
-    id, readSource(() => access.archiveRequests.findRelevantForDetectedDisc(id)),
+    id, readSource(() => readDetectedDiscArchiveRequest(access, id)),
   ]));
   const displayedArchiveRequests = [...new Map([...relevantArchiveRequests.values()].flatMap((source) =>
-    source.status === "loaded" && source.value !== null ? [[source.value.id, source.value] as const] : [],
+    source.status === "loaded" && source.value.request !== null
+      ? [[source.value.request.id, source.value.request] as const]
+      : [],
   )).values()];
   const archiveRequestSource = activityLimit === undefined
     ? readSource(() => access.archiveRequests.list())
@@ -1891,7 +1894,9 @@ function readDashboardSnapshotRecords(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
               const requestSource = relevantArchiveRequests.get(disc.id);
-              const request = requestSource?.status === "loaded" ? requestSource.value : null;
+              const request = requestSource?.status === "loaded" ? requestSource.value.request : null;
+              const requestUnavailable = requestSource?.status === "error" ||
+                requestSource?.value.unavailable === true;
               const retryBlocked = request?.status === "needs_attention" && !isArchiveRequestRetryable(request);
               const requestJobs = request === null
                 ? []
@@ -1912,7 +1917,7 @@ function readDashboardSnapshotRecords(
                   ? (decodeDvdTitleMap(disc.scanData)?.titles ?? [])
                   : [],
                 detectedAt: disc.detectedAt.toISOString(),
-                ...(requestSource?.status === "error" ? { archiveRequestUnavailable: true as const } : {}),
+                ...(requestUnavailable ? { archiveRequestUnavailable: true as const } : {}),
                 archiveRequest: request === null ? null : {
                   id: request.id,
                   status: request.status,
@@ -1927,9 +1932,9 @@ function readDashboardSnapshotRecords(
           );
         })();
 
-  const latestDisplayedArchiveJobIdByRequest =
-    archiveJobSource.status === "loaded"
-      ? archiveJobSource.value.reduce((latestByRequest, job) => {
+  const latestArchiveJobByRequest =
+    archiveJobSource.status === "loaded" && latestRequestJobSource.status === "loaded"
+      ? [...archiveJobSource.value, ...latestRequestJobSource.value].reduce((latestByRequest, job) => {
           const latest = latestByRequest.get(job.archiveRequestId);
           if (
             latest === undefined ||
@@ -2000,7 +2005,7 @@ function readDashboardSnapshotRecords(
                       job,
                       request: requestsById?.get(job.archiveRequestId),
                       isLatestAttempt:
-                        latestDisplayedArchiveJobIdByRequest
+                        latestArchiveJobByRequest
                           ?.get(job.archiveRequestId)?.id === job.id,
                     }),
                   }

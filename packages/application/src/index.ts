@@ -272,6 +272,7 @@ export {
   isOperationKind,
   isWaitableKind,
   OPERATION_KINDS,
+  readDetectedDiscArchiveRequest,
   validOperationLimit,
   waitForOperation,
 } from "./operations.js";

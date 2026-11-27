@@ -3,6 +3,7 @@ import {
   activeEncodeWorkIdentities,
   archiveRecoveryWorkIdentity,
   createEncodeWorkConflictCurrent,
+  DomainInvariantError,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   ENCODE_WORK_CONFLICT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
@@ -647,19 +648,39 @@ function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueA
   }];
 }
 
-function detectedDiscActions(disc: DetectedDisc, relevantRequest: ArchiveRequest | null) {
-  const eligible = (disc.status === "scanned" &&
-    (relevantRequest === null || relevantRequest.status === "cancelled")) ||
-    (disc.status === "approved" && relevantRequest?.status === "cancelled");
-  const reason = relevantRequest && relevantRequest.status !== "cancelled"
-    ? `Archive Request is ${relevantRequest.status}.`
+export function readDetectedDiscArchiveRequest(
+  access: Pick<ConsistentReadAccess, "archiveRequests">,
+  id: DetectedDiscId,
+) {
+  try {
+    return { request: access.archiveRequests.findRelevantForDetectedDisc(id), unavailable: false };
+  } catch (error) {
+    if (!(error instanceof DomainInvariantError)) throw error;
+    return { request: null, unavailable: true };
+  }
+}
+
+function detectedDiscActions(
+  disc: DetectedDisc,
+  { request, unavailable }: ReturnType<typeof readDetectedDiscArchiveRequest>,
+) {
+  const eligible = !unavailable && ((disc.status === "scanned" &&
+    (request === null || request.status === "cancelled")) ||
+    (disc.status === "approved" && request?.status === "cancelled"));
+  const reason = unavailable
+    ? "Archive Request status is unavailable."
+    : request && request.status !== "cancelled"
+    ? `Archive Request is ${request.status}.`
     : `Detected Disc is ${disc.status}.`;
   return [{
     name: "request-archive",
     eligible,
     requiredInputs: ["mutationKey", "detectedDiscId"],
     reason: eligible ? null : reason,
-    blockingReasons: eligible ? [] : [{ code: "INVALID_TRANSITION", message: reason }],
+    blockingReasons: eligible ? [] : [{
+      code: unavailable ? "ARCHIVE_REQUEST_IDENTITY_UNAVAILABLE" : "INVALID_TRANSITION",
+      message: reason,
+    }],
   }];
 }
 
@@ -783,8 +804,7 @@ function readDetail(
       const disc = access.catalog.listDetectedDiscs(undefined, { ids: [id as DetectedDiscId] })[0];
       if (!disc) return null;
       const requests = access.archiveRequests.listForDetectedDisc(disc.id);
-      const relevantRequest = access.archiveRequests
-        .listRelevantForDetectedDiscs([disc.id])[0] ?? null;
+      const archiveRequest = readDetectedDiscArchiveRequest(access, disc.id);
       const archives = access.catalog.listOriginalDiscArchives({
         detectedDiscId: disc.id,
       });
@@ -794,14 +814,16 @@ function readDetail(
         inspections: access.discInspections.list({ detectedDiscId: disc.id })
           .map(visibleInspection),
         archiveRequests: requests.map(visibleArchiveRequest),
-        currentArchiveRequest: relevantRequest === null ? null : visibleArchiveRequest(relevantRequest),
+        ...(archiveRequest.unavailable ? { archiveRequestUnavailable: true } : {}),
+        currentArchiveRequest: archiveRequest.request === null
+          ? null : visibleArchiveRequest(archiveRequest.request),
         archiveJobs: access.archiveJobs.list(undefined, {
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
         archives: archives.map((archive) =>
           visibleArchive(archive, evidenceHeaders)
         ),
-        availableActions: detectedDiscActions(disc, relevantRequest),
+        availableActions: detectedDiscActions(disc, archiveRequest),
       };
     }
     case "disc-inspections": {

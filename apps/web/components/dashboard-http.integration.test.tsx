@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { dirname } from "node:path";
+import { DomainInvariantError } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
+import { runCommand } from "../../operator-cli/src/command.js";
 import { createOperatorWorkflowFixture } from "../../operator-cli/src/operator-workflow.test-support.js";
 import {
   type OpticalDriveHardware,
@@ -110,6 +113,17 @@ describe("database-backed dashboard over HTTP", () => {
         })]),
       });
       await expectRequest("needs_attention", "Retry archive", false);
+      access.discInspections.clearCurrent({ opticalDriveId: current.drive.id, reasonCode: "no_medium" });
+      completeDiscInspection(access, initial.disc, "synthetic-check-first-attempt", 8_192);
+      const returned = (await createDashboardResponse(access).json()) as DashboardSnapshot;
+      expect(returned.archiveJobs).toMatchObject({
+        status: "loaded",
+        items: expect.arrayContaining([expect.objectContaining({
+          id: claim!.id, investigation: expect.objectContaining({ retryability: "not_appropriate" }),
+        })]),
+      });
+      access.discInspections.clearCurrent({ opticalDriveId: initial.drive.id, reasonCode: "no_medium" });
+      completeDiscInspection(access, current.disc, "synthetic-check-alternate-again", 8_192);
       const snapshotWithClosedEvidence = withSnapshotOverrides(access, {
         archiveRequests: {
           findRelevantForDetectedDisc(id) {
@@ -146,7 +160,7 @@ describe("database-backed dashboard over HTTP", () => {
   });
 
   it("keeps other disc controls available when one request identity is undecidable", async () => {
-    const access = dataAccessFixture.create();
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
     const inspectDvd = (suffix: string) => {
       const drive = access.catalog.upsertOpticalDrive({
         devicePath: `/dev/synthetic-unavailable-${suffix}`, isEnabled: true, isPresent: true,
@@ -162,14 +176,15 @@ describe("database-backed dashboard over HTTP", () => {
     const affected = inspectDvd("affected");
     const other = inspectDvd("other");
     const request = access.archiveRequests.create({ detectedDiscId: other.id });
-    const response = createDashboardResponse(withSnapshotOverrides(access, {
+    const overrides: Parameters<typeof withSnapshotOverrides>[1] = {
       archiveRequests: {
         findRelevantForDetectedDisc(id) {
-          if (id === affected.id) throw new Error("Synthetic ambiguous Archive Request identity");
+          if (id === affected.id) throw new DomainInvariantError("Synthetic ambiguous Archive Request identity");
           return access.archiveRequests.findRelevantForDetectedDisc(id);
         },
       },
-    }));
+    };
+    const response = createDashboardResponse(withSnapshotOverrides(access, overrides));
     const dashboard = (await response.json()) as DashboardSnapshot;
     expect(dashboard.detectedDiscs).toMatchObject({
       status: "loaded",
@@ -185,6 +200,23 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain("Archive Request status is unavailable.");
     expect(html).toContain("Cancel request");
     expect(html).not.toContain("Request archive");
+    const output: string[] = [];
+    const exitCode = await runCommand(["inspect", "detected-discs", affected.id], {
+      openAccess: () => withSnapshotOverrides(createLegacySidecarDataAccess({ databasePath }), overrides),
+      originalsLibraryPath: () => dirname(databasePath),
+      stdout: (message) => output.push(message),
+      stderr: () => {},
+    });
+    expect(exitCode, output.join("")).toBe(0);
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      item: {
+        id: affected.id,
+        archiveRequestUnavailable: true,
+        currentArchiveRequest: null,
+        availableActions: [{ name: "request-archive", eligible: false,
+          blockingReasons: [{ code: "ARCHIVE_REQUEST_IDENTITY_UNAVAILABLE" }] }],
+      },
+    });
   });
 
   it("projects a running Archive Request onto a matching Detected Disc in another Optical Drive", async () => {
