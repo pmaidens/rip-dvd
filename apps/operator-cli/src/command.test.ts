@@ -2019,6 +2019,7 @@ it("discovers commands and rejects unsupported invocations without opening SQLit
     commands: [
       "encode-readiness",
       "damage-preview",
+      "archiving-settings",
       "notifications",
       "generate-key",
       "submit-archive-request",
