@@ -66,12 +66,13 @@ describe("database-backed dashboard over HTTP", () => {
       access.archiveJobs.fail(claim!, "Synthetic initial copy failure");
       access.discInspections.clearCurrent({ opticalDriveId: initial.drive.id, reasonCode: "no_medium" });
       const current = inspectDvd("second");
+      let attemptCount = 1;
 
       async function expectRequest(
         status: string,
         button: string,
         canRequest: boolean,
-        expected = { discId: current.disc.id, requestId: request!.id, attemptCount: 1 },
+        expected = { discId: current.disc.id, requestId: request!.id, attemptCount },
       ) {
         const dashboard = (await createDashboardResponse(access).json()) as DashboardSnapshot;
         expect(dashboard.detectedDiscs).toMatchObject({
@@ -97,6 +98,18 @@ describe("database-backed dashboard over HTTP", () => {
       expect(await fixture.run(["retry-archive-request", "--key", "synthetic-automatic-retry", "--archive-request-id", request!.id]))
         .toMatchObject({ exitCode: 0 });
       await expectRequest("pending", "Cancel request", false);
+      const secondAttempt = access.archiveJobs.startForInspection(current.inspection.id, "synthetic-second-worker");
+      expect(secondAttempt?.archiveRequestId).toBe(request!.id);
+      access.archiveJobs.fail(secondAttempt!, "Synthetic alternate copy failure");
+      attemptCount += 1;
+      const failed = (await createDashboardResponse(access).json()) as DashboardSnapshot;
+      expect(failed.archiveJobs).toMatchObject({
+        status: "loaded",
+        items: expect.arrayContaining([expect.objectContaining({
+          id: secondAttempt!.id, investigation: expect.objectContaining({ retryability: "after_action" }),
+        })]),
+      });
+      await expectRequest("needs_attention", "Retry archive", false);
       expect(await fixture.run(["cancel-archive-request", "--key", "synthetic-automatic-cancel", "--archive-request-id", request!.id]))
         .toMatchObject({ exitCode: 0 });
       await expectRequest("cancelled", "Request archive again", true);

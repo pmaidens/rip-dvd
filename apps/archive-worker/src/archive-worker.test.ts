@@ -1521,6 +1521,54 @@ describe("automatic Archive Request admission", () => {
       fixture.close();
     }
   });
+
+  it("continues scheduled work on other drives when retained identity history exceeds the lookup limit", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, copyRunner, databasePath, first, second, originalsLibraryPath } = fixture;
+    const stoppedFingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
+    const queuedFingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
+    try {
+      fixture.insert(first, stoppedFingerprint);
+      fixture.insert(second, queuedFingerprint);
+      await fixture.poll();
+      const queued = access.catalog.listDetectedDiscs().find(({ fingerprint }) => fingerprint === queuedFingerprint)!;
+      const request = access.archiveRequests.create({ detectedDiscId: queued.id });
+
+      const sqlite = new DatabaseSync(databasePath);
+      try {
+        const drive = sqlite.prepare(`
+          INSERT INTO optical_drives (id, device_path, is_present, last_seen_at, created_at, updated_at)
+          VALUES (?, ?, 0, 1, 1, 1)
+        `);
+        const disc = sqlite.prepare(`
+          INSERT INTO detected_discs (id, optical_drive_id, disc_kind, fingerprint, status, detected_at, created_at, updated_at)
+          VALUES (?, ?, 'dvd', ?, 'approved', 1, 1, 1)
+        `);
+        const cancel = sqlite.prepare(`
+          INSERT INTO archive_requests (id, detected_disc_id, status, cancelled_at, cancellation_requested_at, created_at, updated_at)
+          VALUES (?, ?, 'cancelled', 2, 2, 1, 2)
+        `);
+        sqlite.exec("BEGIN");
+        for (let index = 0; index < 257; index += 1) {
+          drive.run(`synthetic-old-drive-${index}`, `/dev/synthetic-old-drive-${index}`);
+          disc.run(`synthetic-old-disc-${index}`, `synthetic-old-drive-${index}`, stoppedFingerprint);
+          cancel.run(`synthetic-old-request-${index}`, `synthetic-old-disc-${index}`);
+        }
+        sqlite.exec("COMMIT");
+      } finally {
+        sqlite.close();
+      }
+
+      fixture.set(true);
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(access.archiveJobs.list()).toEqual([
+        expect.objectContaining({ archiveRequestId: request.id, status: "completed" }),
+      ]);
+      expect(access.archiveRequests.list(["pending"])).toEqual([]);
+    } finally {
+      fixture.close();
+    }
+  });
 });
 
 describe("archive worker polling", () => {

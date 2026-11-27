@@ -7441,6 +7441,11 @@ export function createDataAccessInternal(
       eq(detectedDiscs.discKind, "dvd"),
       eq(detectedDiscs.status, "approved"),
       ne(detectedDiscs.id, disc.id),
+      exists(reader.select({ id: archiveRequests.id }).from(archiveRequests).where(and(
+        eq(archiveRequests.detectedDiscId, detectedDiscs.id),
+        sql`${archiveRequests.status} = 'cancelled'`,
+        isNull(archiveRequests.rearchiveSourceArchiveId),
+      ))),
     )).limit(ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT + 1).all();
     if (observations.length > ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT) {
       throw new DomainInvariantError("Cancelled Archive Request identity lookup exceeds the safety limit");

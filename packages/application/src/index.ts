@@ -268,6 +268,7 @@ export {
   encodeRequeueAvailability,
   inspectOperations,
   inspectOperationsWithArtifacts,
+  isArchiveRequestRetryable,
   isOperationKind,
   isWaitableKind,
   OPERATION_KINDS,

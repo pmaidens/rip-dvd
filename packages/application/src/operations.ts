@@ -484,6 +484,12 @@ function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
   ].slice(0, limit);
 }
 
+export function isArchiveRequestRetryable(
+  request: Pick<ArchiveRequest, "status" | "evidenceFormat"> | undefined,
+): boolean {
+  return request?.status === "needs_attention" && request.evidenceFormat === null;
+}
+
 function requestActions(request: ArchiveRequest) {
   if (request.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
     const cancelEligible = ["pending", "running", "needs_attention"].includes(
@@ -508,7 +514,7 @@ function requestActions(request: ArchiveRequest) {
   const reason = `Archive Request is ${request.status}.`;
   return [
     recoveryAction("cancel", ["pending", "running", "needs_attention"].includes(request.status), reason, "archiveRequestId"),
-    recoveryAction("retry", request.status === "needs_attention", reason, "archiveRequestId"),
+    recoveryAction("retry", isArchiveRequestRetryable(request), reason, "archiveRequestId"),
   ];
 }
 

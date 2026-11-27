@@ -5,6 +5,7 @@ import {
   type ArchiveJobTiming,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
+  isArchiveRequestRetryable,
   parseCatalogReviewCursor,
   readCatalogReviewPage,
   readMediaItemsWithAncestors,
@@ -20,6 +21,7 @@ import type {
   ArchiveJobStatus,
   ArchiveProgressPhase,
   ArchiveRecovery,
+  ArchiveRequest,
   ArchiveRequestStatus,
   CatalogReviewArchiveListCursor,
   CatalogReviewArchiveView,
@@ -68,7 +70,6 @@ import {
   DASHBOARD_ACTIVITY_HISTORY_LIMIT,
   DASHBOARD_ENCODE_OUTPUT_ARTIFACT_LIMIT,
 } from "./dashboard-bounds";
-import { isArchiveJobRetryable } from "./archive-job-retryability";
 import { isTerminalEncodeJobStatus } from "./encode-job-status";
 import { formatFailureDetail } from "./failure-detail";
 import type {
@@ -737,13 +738,11 @@ function archiveReadFailureEvidence(
 
 function archiveJobInvestigation({
   job,
-  requestStatus,
-  discStatus,
+  request,
   isLatestAttempt,
 }: {
   job: ArchiveJob;
-  requestStatus: ArchiveRequestStatus | null;
-  discStatus: DetectedDiscStatus | null;
+  request: ArchiveRequest | undefined;
   isLatestAttempt: boolean;
 }): DashboardInvestigation {
   const presentation = job.readFailureCategory === null
@@ -755,13 +754,8 @@ function archiveJobInvestigation({
         retryability: "after_action" as const,
       }
     : READ_FAILURE_PRESENTATIONS[job.readFailureCategory];
-  const retryIsAvailable =
-    isLatestAttempt &&
-    requestStatus === "needs_attention" &&
-    isArchiveJobRetryable(
-      job,
-      discStatus === null ? undefined : { status: discStatus },
-    );
+  const requestStatus = request?.status ?? null;
+  const retryIsAvailable = isLatestAttempt && isArchiveRequestRetryable(request);
   const retryability: InvestigationRetryability = retryIsAvailable
     ? presentation.retryability
     : "not_appropriate";
@@ -2003,9 +1997,7 @@ function readDashboardSnapshotRecords(
                 ? {
                     investigation: archiveJobInvestigation({
                       job,
-                      requestStatus:
-                        requestsById?.get(job.archiveRequestId)?.status ?? null,
-                      discStatus: disc?.status ?? null,
+                      request: requestsById?.get(job.archiveRequestId),
                       isLatestAttempt:
                         latestDisplayedArchiveJobIdByRequest
                           ?.get(job.archiveRequestId)?.id === job.id,
