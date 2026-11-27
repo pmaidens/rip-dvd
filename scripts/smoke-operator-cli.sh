@@ -78,6 +78,12 @@ for timing_observation in 1 2; do
     'item.timing.startedAt=1970-01-01T00:00:01.000Z' \
     'item.timing.completedAt=1970-01-01T00:00:04.750Z'
 done
+timing_request="$(printf '%s\n' "$timing_result" | node -e '
+  const job = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+  process.stdout.write(job.item.archiveRequest.id);
+')"
+request_result="$(invoke inspect archive-requests "$timing_request")"
+printf '%s\n' "$request_result" | assert_json_fields 'item.origin=manual'
 
 notification_status="$(invoke notifications status)"
 printf '%s\n' "$notification_status" | assert_json_fields \

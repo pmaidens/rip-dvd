@@ -1179,6 +1179,9 @@ function DetectedDiscItem({
   onApproveDetectedDisc: (id: string) => void;
   onRetryArchiveRequest: (id: string) => void;
 }) {
+  const automaticRequestLabel = disc.archiveRequest?.origin === "automatic"
+    ? "Requested automatically"
+    : null;
   if (disc.status === "archived") {
     return (
       <article className="operation-item archived-disc-item">
@@ -1189,6 +1192,9 @@ function DetectedDiscItem({
               <span>{disc.opticalDriveName}</span>
             </span>
             <StatusBadge value={disc.status} />
+            {automaticRequestLabel && disc.archiveRequest?.status === "fulfilled" && (
+              <span className="archived-disc-origin">{automaticRequestLabel}</span>
+            )}
           </summary>
           <div className="archived-disc-details">
             <DetectedDiscDetails disc={disc} collapseInspection={false} />
@@ -1206,6 +1212,7 @@ function DetectedDiscItem({
         <div>
           <h3>{disc.volumeLabel}</h3>
           <p>{disc.opticalDriveName}</p>
+          {automaticRequestLabel && <p>{automaticRequestLabel}</p>}
         </div>
         <StatusBadge value={disc.status} />
       </div>

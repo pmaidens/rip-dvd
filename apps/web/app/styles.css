@@ -2586,6 +2586,12 @@ h2 {
   font-size: 0.75rem;
 }
 
+.archived-disc-origin {
+  grid-column: 2 / -1;
+  color: #829790;
+  font-size: 0.75rem;
+}
+
 .archived-disc-details {
   padding: 0 1.4rem 1.25rem;
 }

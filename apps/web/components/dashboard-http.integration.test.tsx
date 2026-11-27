@@ -111,23 +111,34 @@ describe("database-backed dashboard over HTTP", () => {
         status: string,
         button: string,
         canRequest: boolean,
-        expected = { discId: current.disc.id, requestId: request!.id, attemptCount },
+        expected: {
+          discId: string;
+          requestId: string;
+          attemptCount: number;
+          origin: "automatic" | "manual";
+        } = { discId: current.disc.id, requestId: request!.id, attemptCount, origin: "automatic" },
       ) {
+        const requestIdentity = { id: expected.requestId, status, origin: expected.origin };
         const dashboard = (await createDashboardResponse(access).json()) as DashboardSnapshot;
         expect(dashboard.detectedDiscs).toMatchObject({
           status: "loaded",
           items: [{
             id: expected.discId,
-            archiveRequest: { id: expected.requestId, status, attemptCount: expected.attemptCount },
+            archiveRequest: { ...requestIdentity, attemptCount: expected.attemptCount },
           }],
         });
         const html = renderToStaticMarkup(<DashboardView state={dashboard} section="discs" />);
         expect(html).toContain(button);
         if (!canRequest) expect(html).not.toContain("Request archive");
+        expect(html.includes("Requested automatically")).toBe(expected.origin === "automatic");
+        expect(await fixture.run(["inspect", "archive-requests", expected.requestId])).toMatchObject({
+          exitCode: 0,
+          result: { item: requestIdentity },
+        });
         expect(await fixture.run(["inspect", "detected-discs", expected.discId])).toMatchObject({
           exitCode: 0,
           result: { item: {
-            currentArchiveRequest: { id: expected.requestId, status },
+            currentArchiveRequest: requestIdentity,
             availableActions: [{ name: "request-archive", eligible: canRequest }],
           } },
         });
@@ -217,7 +228,7 @@ describe("database-backed dashboard over HTTP", () => {
       access.discInspections.clearCurrent({ opticalDriveId: current.drive.id, reasonCode: "no_medium" });
       completeDiscInspection(access, initial.disc, "synthetic-return-first-drive", 8_192);
       await expectRequest("pending", "Cancel request", false, {
-        discId: initial.disc.id, requestId: activeRequests[0]!.id, attemptCount: 0,
+        discId: initial.disc.id, requestId: activeRequests[0]!.id, attemptCount: 0, origin: "manual",
       });
     } finally {
       access.close();
@@ -846,7 +857,7 @@ describe("database-backed dashboard over HTTP", () => {
     }
   });
 
-  it("renders persisted discovery and scan results including an already archived match", async () => {
+  it.each(["none", "automatic", "cancelled"] as const)("renders an already archived match with %s request history", async (requestHistory) => {
     const access = dataAccessFixture.create();
     const hardware: OpticalDriveHardware = {
       bindOpticalDrive: vi.fn(async (drive, signal) => {
@@ -874,6 +885,7 @@ describe("database-backed dashboard over HTTP", () => {
         fingerprint:
           "sha256:2222222222222222222222222222222222222222222222222222222222222222",
         volumeLabel: "MOCKED_DISC",
+        sizeBytes: 2_048,
         scanData: {
           schemaVersion: 2,
           contentId:
@@ -918,7 +930,20 @@ describe("database-backed dashboard over HTTP", () => {
       fingerprint:
         "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     });
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    if (requestHistory !== "none") {
+      access.archivingSettings.set({
+        mutationKey: "synthetic-archived-disc-opt-in", automaticallyArchiveInsertedDvds: true,
+      });
+      const [inspection] = access.discInspections.list({ currentOnly: true });
+      access.archiveRequests.admitAutomatically({
+        inspectionId: inspection.id, mediaGeneration: inspection.mediaGeneration,
+      });
+      if (requestHistory === "cancelled") {
+        access.archiveRequests.cancel(access.archiveRequests.list()[0].id);
+      }
+    } else {
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    }
     access.catalog.createOriginalDiscArchive({
       detectedDiscId: disc.id,
       discKind: "dvd",
@@ -935,6 +960,7 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain("Mocked Optical Drive");
     expect(html).toContain("MOCKED_DISC");
     expect(html).toContain("Already archived");
+    expect(html.includes("Requested automatically")).toBe(requestHistory === "automatic");
     expect(html).toContain("Title 7");
     expect(html).toContain("1h 2m 3s");
     expect(html).toContain("9 chapters · 1 audio · 1 subtitle");

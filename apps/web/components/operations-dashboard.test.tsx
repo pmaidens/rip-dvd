@@ -1140,6 +1140,7 @@ describe("DashboardView", () => {
                   archiveRequest: {
                     id: "cancelled-request",
                     status: "cancelled" as const,
+                    origin: null,
                     attemptCount: 0,
                     latestFailureDetail: null,
                     createdAt: "2026-07-22T08:00:00.000Z",
@@ -2502,6 +2503,7 @@ function mutationDashboardState(
                 archiveRequest: {
                   id: "cancelled-request",
                   status: "cancelled" as const,
+                  origin: "manual" as const,
                   attemptCount: 0,
                   latestFailureDetail: null,
                   createdAt: "2026-08-10T19:01:00.000Z",

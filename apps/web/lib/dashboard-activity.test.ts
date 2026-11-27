@@ -530,6 +530,7 @@ describe("watchDashboardActivity", () => {
         archiveRequest: {
           id: "request-1",
           status: "needs_attention",
+          origin: "manual",
           attemptCount: 1,
           latestFailureDetail: "The Optical Drive reported a hardware fault.",
           createdAt: "2026-08-31T05:58:00.000Z",
