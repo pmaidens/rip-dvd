@@ -25,6 +25,35 @@ test("requests an archive on an ordinary HTTP origin", async ({ page }, testInfo
   await expect(disc.getByRole("button", { name: "Cancel request", exact: true })).toBeVisible();
 });
 
+test("keeps automatic Archive Request origin through reload and Retry until a manual replacement", async ({ page }, testInfo) => {
+  const variant = testInfo.project.name === "desktop" ? "desktop" : "mobile";
+  await page.goto("/discs");
+  const disc = page.getByRole("article")
+    .filter({ has: page.getByRole("heading", { name: `HTTP archive fixture automatic-${variant}`, exact: true }) })
+    .filter({ has: page.getByRole("region", { name: "Archive Request", exact: true }) });
+  const origin = disc.getByText("Requested automatically", { exact: true });
+  const retry = disc.getByRole("button", { name: "Retry archive", exact: true });
+  const cancel = disc.getByRole("button", { name: "Cancel request", exact: true });
+
+  await expect(retry).toBeVisible();
+  await expect(origin).toBeVisible();
+  await page.reload();
+  await expect(origin).toBeVisible();
+  await retry.click();
+  await expect(cancel).toBeVisible();
+  await expect(origin).toBeVisible();
+  await cancel.click();
+  const requestAgain = disc.getByRole("button", { name: "Request archive again", exact: true });
+  await expect(requestAgain).toBeVisible();
+  await expect(origin).toBeVisible();
+  await requestAgain.click();
+  await expect(cancel).toBeVisible();
+  await expect(origin).toHaveCount(0);
+  await page.reload();
+  await expect(cancel).toBeVisible();
+  await expect(origin).toHaveCount(0);
+});
+
 test("shows the saved archive and active recovery as one truthful artifact", async ({
   page,
 }, testInfo) => {

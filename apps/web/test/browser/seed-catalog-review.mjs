@@ -83,8 +83,8 @@ function createArchive({ key, label, fingerprintFill, titles }) {
   });
 }
 
-async function seedArchiveRequest(variant) {
-  const fingerprint = `sha256:${(variant === "desktop" ? "12" : variant === "mobile" ? "34" : "56").repeat(32)}`;
+async function seedArchiveRequest(variant, fingerprintFill, { automatic = false } = {}) {
+  const fingerprint = `sha256:${fingerprintFill.repeat(32)}`;
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: `/dev/browser-intake-${variant}`,
     displayName: `Browser intake ${variant}`,
@@ -112,12 +112,24 @@ async function seedArchiveRequest(variant) {
     scanData: { schemaVersion: 2, contentId: fingerprint, titles: [detailedTitle(1, 5_400, 14)] },
   });
   access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  if (automatic) {
+    access.discInspections.record(claim, {
+      type: "metadata", volumeLabel: disc.volumeLabel, titleCount: 1, chapterCount: 14,
+      audioStreamCount: 8, subtitleStreamCount: 12, totalBytes: observation.mediaCapacityBytes,
+    });
+  }
   const inspection = access.discInspections.record(claim, { type: "complete", detectedDiscId: disc.id });
-  if (variant === "notification") {
+  if (automatic) {
+    access.archiveRequests.admitAutomatically({
+      inspectionId: inspection.id, mediaGeneration: observation.mediaGeneration,
+    });
+  } else if (variant === "notification") {
     access.archiveRequests.create({ detectedDiscId: disc.id });
-    const job = access.archiveJobs.startForInspection(inspection.id, "synthetic-notification-worker");
-    if (!job) throw new Error("Expected a synthetic notification target Archive Job");
-    access.archiveJobs.fail(job, "Synthetic outcome for notification navigation coverage");
+  }
+  if (automatic || variant === "notification") {
+    const job = access.archiveJobs.startForInspection(inspection.id, `synthetic-browser-${variant}-worker`);
+    if (!job) throw new Error(`Expected an Archive Job for the ${variant} browser fixture`);
+    access.archiveJobs.fail(job, "Synthetic browser fixture copy failure");
   }
 }
 
@@ -877,7 +889,19 @@ function seedEncodeQueue(variant, fingerprintFills) {
 }
 
 try {
-  await Promise.all([seedArchiveRequest("desktop"), seedArchiveRequest("mobile"), seedArchiveRequest("notification")]);
+  access.archivingSettings.set({
+    mutationKey: "synthetic-browser-archive-origin-enable", automaticallyArchiveInsertedDvds: true,
+  });
+  await Promise.all([
+    seedArchiveRequest("desktop", "12"),
+    seedArchiveRequest("mobile", "34"),
+    seedArchiveRequest("notification", "56"),
+    seedArchiveRequest("automatic-desktop", "78", { automatic: true }),
+    seedArchiveRequest("automatic-mobile", "90", { automatic: true }),
+  ]);
+  access.archivingSettings.set({
+    mutationKey: "synthetic-browser-archive-origin-disable", automaticallyArchiveInsertedDvds: false,
+  });
   seedTitleDamagePaging("desktop", "ab");
   seedTitleDamagePaging("mobile", "cd");
   seedTitleDamagePaging("notification", "ef");

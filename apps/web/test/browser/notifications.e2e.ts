@@ -2,6 +2,7 @@
 declare const self: ServiceWorkerGlobalScope;
 
 import { expect, test } from "@playwright/test";
+import type { DashboardSnapshot } from "../../lib/dashboard";
 import { clickNotification, completeControlledRecoveryStop, controlledSubscription, deliverPush, dispatchQueuedPushes, recoveryNotificationPayload } from "./notification-test-support";
 
 test("explains missing server setup and visibly disables opt-in", async ({ page }) => {
@@ -174,20 +175,23 @@ test("uses the Settings fallback for unsafe pushes and revalidates untrusted cli
 });
 
 test("opens a labeled Archive Job target using its current shared operation detail", async ({ page }) => {
-  const response = await page.request.get("/api/operations?kind=archive-jobs");
-  const { items } = await response.json();
-  const job = items.find((item: { status: string }) => item.status === "failed");
-  expect(job).toBeTruthy();
+  const discLabel = "SYNTHETIC_NOTIFICATION_DISC";
+  const response = await page.request.get("/api/dashboard");
+  const { archiveJobs }: DashboardSnapshot = await response.json();
+  const job = archiveJobs.status === "loaded" ? archiveJobs.items.find((item) =>
+    item.status === "failed" && item.discLabel === discLabel
+  ) : undefined;
+  if (!job) throw new Error("Expected the failed notification fixture Archive Job");
   const target = `/notifications/target?kind=archive-jobs&id=${encodeURIComponent(job.id)}&source=synthetic-notification`;
   await page.goto(target);
   await expect(page).toHaveURL(target);
-  await expect(page.getByRole("heading", { name: "SYNTHETIC_NOTIFICATION_DISC" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: discLabel })).toBeVisible();
   await expect(page.getByText("failed", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Notification settings", exact: true }).click();
   await expect(page).toHaveURL("/settings#notifications");
   await page.goBack();
   await expect(page).toHaveURL(target);
-  await expect(page.getByRole("heading", { name: "SYNTHETIC_NOTIFICATION_DISC" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: discLabel })).toBeVisible();
 });
 
 test("opens current Recovery details from a supplied recovery notification", async ({ page, context }) => {

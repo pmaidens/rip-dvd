@@ -198,7 +198,7 @@ export interface DashboardDetectedDisc {
   fingerprint: string;
   titles: readonly DvdTitle[];
   detectedAt: string;
-  archiveRequest?: DashboardArchiveRequest | null;
+  archiveRequest?: (DashboardArchiveRequest & Pick<ArchiveRequest, "origin">) | null;
   archiveRequestUnavailable?: true;
   canRequestArchive?: true;
 }
@@ -1919,6 +1919,7 @@ function readDashboardSnapshotRecords(
                 archiveRequest: request === null ? null : {
                   id: request.id,
                   status: request.status,
+                  origin: request.origin,
                   ...(retryBlocked ? { retryBlocked: true as const } : {}),
                   attemptCount: latestJob?.attemptOrdinal ?? 0,
                   latestFailureDetail: archiveJobFailure(latestJob),
