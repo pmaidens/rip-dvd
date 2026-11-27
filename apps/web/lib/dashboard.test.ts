@@ -229,6 +229,8 @@ describe("readDashboardSnapshot", () => {
   });
 
   it("uses one bounded workflow-evidence read as Catalog Review rows grow", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/synthetic-dashboard-batch",
@@ -236,6 +238,7 @@ describe("readDashboardSnapshot", () => {
       isPresent: true,
     });
     const archiveIds = Array.from({ length: 3 }, (_, index) => {
+      vi.setSystemTime(new Date(Date.UTC(2026, 0, 1, 0, index)));
       const fingerprint = `synthetic-dashboard-batch-${index}`;
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
@@ -253,6 +256,7 @@ describe("readDashboardSnapshot", () => {
         fingerprint,
       }).id;
     });
+    vi.useRealTimers();
     archiveIds.forEach((id, index) =>
       markArchiveWithDvdRecoveryEvidence(
         databasePath,
@@ -286,7 +290,8 @@ describe("readDashboardSnapshot", () => {
     const evidenceHeaders = access.catalog.findDvdArchiveEvidenceHeaders(
       archiveIds,
     );
-    const workflowEvidenceInputs = archiveIds.map((id) => ({
+    const newestFirstArchiveIds = [...archiveIds].reverse();
+    const workflowEvidenceInputs = newestFirstArchiveIds.map((id) => ({
       originalDiscArchiveId: id,
       evidenceHeader: evidenceHeaders.get(id) ?? null,
     }));
@@ -348,7 +353,7 @@ describe("readDashboardSnapshot", () => {
 
     expect(dashboard.catalogReview).toMatchObject({
       status: "loaded",
-      items: archiveIds.map((id) => ({ id })),
+      items: newestFirstArchiveIds.map((id) => ({ id })),
     });
     expect(workflowEvidenceReads).toHaveBeenCalledOnce();
     expect(workflowEvidenceReads).toHaveBeenCalledWith(
@@ -356,12 +361,12 @@ describe("readDashboardSnapshot", () => {
     );
     expect(boundSelectionReads).toHaveBeenCalledOnce();
     expect(boundSelectionReads).toHaveBeenCalledWith({
-      originalDiscArchiveIds: archiveIds,
+      originalDiscArchiveIds: newestFirstArchiveIds,
       limit: archiveIds.length * MAX_DVD_TITLES,
     });
     expect(boundActiveWorkReads).toHaveBeenCalledOnce();
     expect(boundActiveWorkReads).toHaveBeenCalledWith({
-      originalDiscArchiveIds: archiveIds,
+      originalDiscArchiveIds: newestFirstArchiveIds,
       limit: MAX_DVD_TITLES * 8,
     });
     expect(boundMediaItemReads).toHaveBeenCalledTimes(3);
