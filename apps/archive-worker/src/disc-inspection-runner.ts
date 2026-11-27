@@ -28,6 +28,7 @@ export interface CompletedDiscInspection {
   binding: BoundOpticalDrive;
   inspection: DiscInspection;
   mediaGeneration: string;
+  observedCapacityBytes: number | null;
 }
 
 export interface RunDiscInspectionOptions {
@@ -417,7 +418,12 @@ export async function runDiscInspection({
       clearSettlingDeadline();
       return null;
     }
-    return { binding, inspection, mediaGeneration };
+    return {
+      binding,
+      inspection,
+      mediaGeneration,
+      observedCapacityBytes: mediaCapacityBytes,
+    };
   }
   if (!armSettlingDeadline(startedInspection.inspection)) {
     persistSettlingTimeout(
@@ -584,6 +590,7 @@ export async function runDiscInspection({
       binding,
       inspection,
       mediaGeneration: settledMediaGeneration,
+      observedCapacityBytes: settledMediaCapacityBytes,
     };
   } catch (error) {
     if (signal.aborted) {

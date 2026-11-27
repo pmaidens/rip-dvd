@@ -1141,6 +1141,36 @@ describe("automatic Archive Request admission", () => {
     }
   });
 
+  it.each([
+    { capacityBytes: null, condition: "unavailable" },
+    { capacityBytes: 16_384, condition: "changed" },
+  ])("waits to admit a previously inspected DVD when current capacity is $condition", async ({ capacityBytes }) => {
+    const fixture = automaticArchivingFixture();
+    const { access, first, hardware } = fixture;
+    try {
+      fixture.insert(first, `dvdmeta-sha256:${"1".repeat(64)}`);
+      await fixture.poll();
+      const [inspection] = access.discInspections.list({ currentOnly: true });
+      expect(inspection).toMatchObject({ status: "completed", totalBytes: 8_192 });
+
+      fixture.set(true);
+      hardware.observeMedia.mockResolvedValueOnce({
+        mediaGeneration: inspection!.mediaGeneration,
+        capacityBytes,
+      });
+      await fixture.poll();
+      expect(access.archiveRequests.list()).toEqual([]);
+
+      await fixture.poll();
+      expect(hardware.scanDvd).toHaveBeenCalledOnce();
+      expect(access.archiveRequests.list()).toEqual([
+        expect.objectContaining({ origin: "automatic", status: "pending" }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("keeps previously admitted work in the queue after ejection and opt-out", async () => {
     const fixture = automaticArchivingFixture();
     const { access, copyRunner, first, second, originalsLibraryPath } = fixture;

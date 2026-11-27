@@ -301,10 +301,15 @@ async function pollArchiveWorkerWithDriveAdmission(
       if (completed === null) {
         return;
       }
-      access.archiveRequests.admitAutomatically({
-        inspectionId: completed.inspection.id,
-        mediaGeneration: completed.mediaGeneration,
-      });
+      if (
+        completed.observedCapacityBytes !== null &&
+        completed.observedCapacityBytes === completed.inspection.totalBytes
+      ) {
+        access.archiveRequests.admitAutomatically({
+          inspectionId: completed.inspection.id,
+          mediaGeneration: completed.mediaGeneration,
+        });
+      }
       if (copyRunner === undefined || originalsLibraryPath === undefined) {
         return;
       }

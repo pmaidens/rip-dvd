@@ -1784,22 +1784,17 @@ function readDashboardSnapshotRecords(
           linkedDetectedDiscSource.value.map((disc) => [disc.id, disc]),
         )
       : null;
-  const jobsByRequestId =
+  const latestArchiveJobByRequest =
     archiveJobSource.status === "loaded" &&
     latestRequestJobSource.status === "loaded"
-    ? [...new Map(
-        [...archiveJobSource.value, ...latestRequestJobSource.value]
-          .map((job) => [job.id, job]),
-      ).values()].reduce((grouped, job) => {
-        const jobs = grouped.get(job.archiveRequestId) ?? [];
-        jobs.push(job);
-        grouped.set(job.archiveRequestId, jobs);
-        return grouped;
-      }, new Map<
-        (typeof archiveJobSource.value)[number]["archiveRequestId"],
-        (typeof archiveJobSource.value)[number][]
-      >())
-    : null;
+      ? [...archiveJobSource.value, ...latestRequestJobSource.value].reduce((latestByRequest, job) => {
+          const latest = latestByRequest.get(job.archiveRequestId);
+          if (latest === undefined || job.attemptOrdinal > latest.attemptOrdinal) {
+            latestByRequest.set(job.archiveRequestId, job);
+          }
+          return latestByRequest;
+        }, new Map<ArchiveJob["archiveRequestId"], ArchiveJob>())
+      : null;
   const requestByDiscId = archiveRequestSource.status === "loaded"
     ? archiveRequestSource.value.reduce((requests, request) => {
         const existing = requests.get(request.detectedDiscId);
@@ -1889,7 +1884,7 @@ function readDashboardSnapshotRecords(
     drivesById === null ||
     requestByDiscId === null ||
     requestsById === null ||
-    jobsByRequestId === null
+    latestArchiveJobByRequest === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
           return loaded(
@@ -1903,12 +1898,9 @@ function readDashboardSnapshotRecords(
                 request, unavailable: requestUnavailable,
               });
               const retryBlocked = request?.status === "needs_attention" && !isArchiveRequestRetryable(request);
-              const requestJobs = request === null
-                ? []
-                : (jobsByRequestId.get(request.id) ?? []);
-              const latestJob = requestJobs.toSorted(
-                (left, right) => right.attemptOrdinal - left.attemptOrdinal,
-              )[0];
+              const latestJob = request === null
+                ? undefined
+                : latestArchiveJobByRequest.get(request.id);
               return {
                 id: disc.id,
                 volumeLabel: disc.volumeLabel ?? "Unlabeled disc",
@@ -1937,20 +1929,6 @@ function readDashboardSnapshotRecords(
             }),
           );
         })();
-
-  const latestArchiveJobByRequest =
-    archiveJobSource.status === "loaded" && latestRequestJobSource.status === "loaded"
-      ? [...archiveJobSource.value, ...latestRequestJobSource.value].reduce((latestByRequest, job) => {
-          const latest = latestByRequest.get(job.archiveRequestId);
-          if (
-            latest === undefined ||
-            job.attemptOrdinal > latest.attemptOrdinal
-          ) {
-            latestByRequest.set(job.archiveRequestId, job);
-          }
-          return latestByRequest;
-        }, new Map<ArchiveJob["archiveRequestId"], ArchiveJob>())
-      : null;
 
   const archiveArtifactActivityRevisions =
     archiveArtifactRevisionSource.status === "loaded"

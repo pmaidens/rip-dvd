@@ -23,6 +23,9 @@ import {
   pollArchiveWorkerForTest as pollArchiveWorker,
   startArchiveJob,
 } from "../test/archive-job-fixture";
+import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
+import { createArchiveRequestCancellationRoute } from "../app/api/archive-requests/[id]/route";
+import { createArchiveRequestRetryRoute } from "../app/api/archive-requests/[id]/retry/route";
 import { createDashboardEventResponse } from "../app/api/dashboard/events/route";
 import { createDashboardResponse } from "../app/api/dashboard/route";
 import { InvestigationPanel } from "./investigation-panel";
@@ -35,6 +38,15 @@ describe("database-backed dashboard over HTTP", () => {
     const fixture = createOperatorWorkflowFixture();
     const access = createLegacySidecarDataAccess({ databasePath: fixture.databasePath });
     const fingerprint = `dvdmeta-sha256:${"8".repeat(64)}`;
+    const trustedOrigin = "http://localhost";
+    const mutationRequest = (path: string, method: string, body: object) => new Request(
+      `${trustedOrigin}/api/archive-requests${path}`,
+      {
+        method,
+        headers: { "Content-Type": "application/json", Host: "localhost", Origin: trustedOrigin },
+        body: JSON.stringify(body),
+      },
+    );
     try {
       const inspectDvd = (suffix: string) => {
         const drive = access.catalog.upsertOpticalDrive({
@@ -122,8 +134,17 @@ describe("database-backed dashboard over HTTP", () => {
       }
 
       await expectRequest("needs_attention", "Retry archive", false);
-      expect(await fixture.run(["retry-archive-request", "--key", "synthetic-automatic-retry", "--archive-request-id", request!.id]))
-        .toMatchObject({ exitCode: 0 });
+      const retryKey = "synthetic-automatic-retry";
+      const webRetry = await createArchiveRequestRetryRoute(
+        mutationRequest(`/${request!.id}/retry`, "POST", { mutationKey: retryKey }),
+        request!.id, () => access, () => trustedOrigin,
+      );
+      expect(webRetry.status).toBe(200);
+      const cliRetry = await fixture.run([
+        "retry-archive-request", "--key", retryKey, "--archive-request-id", request!.id,
+      ]);
+      expect(cliRetry.exitCode).toBe(0);
+      expect(cliRetry.result).toEqual(await webRetry.json());
       await expectRequest("pending", "Cancel request", false);
       const secondAttempt = access.archiveJobs.startForInspection(current.inspection.id, "synthetic-second-worker");
       expect(secondAttempt?.archiveRequestId).toBe(request!.id);
@@ -164,19 +185,39 @@ describe("database-backed dashboard over HTTP", () => {
       });
       expect(renderToStaticMarkup(<DashboardView state={legacy} section="discs" />))
         .not.toContain("Retry archive");
-      expect(await fixture.run(["cancel-archive-request", "--key", "synthetic-automatic-cancel", "--archive-request-id", request!.id]))
-        .toMatchObject({ exitCode: 0 });
+      const cancelKey = "synthetic-automatic-cancel";
+      const webCancel = await createArchiveRequestCancellationRoute(
+        mutationRequest(`/${request!.id}`, "DELETE", { mutationKey: cancelKey }),
+        request!.id, () => access, () => trustedOrigin,
+      );
+      expect(webCancel.status).toBe(200);
+      const cliCancel = await fixture.run([
+        "cancel-archive-request", "--key", cancelKey, "--archive-request-id", request!.id,
+      ]);
+      expect(cliCancel.exitCode).toBe(0);
+      expect(cliCancel.result).toEqual(await webCancel.json());
       await expectRequest("cancelled", "Request archive again", true);
 
-      const replacement = access.archiveRequests.submit({
-        detectedDiscId: current.disc.id, mutationKey: "synthetic-request-after-cancel",
-      });
-      expect(replacement.id).not.toBe(request!.id);
-      expect(replacement.origin).toBe("manual");
+      const replacementKey = "synthetic-request-after-cancel";
+      const cliReplacement = await fixture.run([
+        "submit-archive-request", "--key", replacementKey, "--detected-disc-id", current.disc.id,
+      ]);
+      expect(cliReplacement.exitCode).toBe(0);
+      const webReplacement = await createArchiveRequestsRoute(
+        mutationRequest("", "POST", { mutationKey: replacementKey, detectedDiscId: current.disc.id }),
+        () => access, () => trustedOrigin,
+      );
+      expect(webReplacement.status).toBe(201);
+      expect(cliReplacement.result).toEqual(await webReplacement.json());
+      const activeRequests = access.archiveRequests.list(["pending"]);
+      expect(activeRequests).toEqual([expect.objectContaining({
+        detectedDiscId: current.disc.id, origin: "manual",
+      })]);
+      expect(activeRequests[0]!.id).not.toBe(request!.id);
       access.discInspections.clearCurrent({ opticalDriveId: current.drive.id, reasonCode: "no_medium" });
       completeDiscInspection(access, initial.disc, "synthetic-return-first-drive", 8_192);
       await expectRequest("pending", "Cancel request", false, {
-        discId: initial.disc.id, requestId: replacement.id, attemptCount: 0,
+        discId: initial.disc.id, requestId: activeRequests[0]!.id, attemptCount: 0,
       });
     } finally {
       access.close();
