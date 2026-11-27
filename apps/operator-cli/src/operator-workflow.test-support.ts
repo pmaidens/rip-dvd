@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { vi } from "vitest";
 
 import {
   archiveBoundaryEvidenceFromRecord,
@@ -82,6 +83,39 @@ export function createOperatorWorkflowFixture(directory = mkdtempSync(join(tmpdi
       rmSync(directory, { recursive: true, force: true });
     },
   };
+}
+
+export function seedCatalogReviewQueue(
+  current: ReturnType<typeof createOperatorWorkflowFixture>,
+  archiveCount: number,
+) {
+  const access = createLegacySidecarDataAccess({ databasePath: current.databasePath });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/synthetic-review-queue", isPresent: true,
+    });
+    return Array.from({ length: archiveCount }, (_, index) => {
+      vi.setSystemTime(new Date(Date.UTC(2026, 0, 1, 0, index)));
+      const fingerprint = `synthetic-review-queue-${index}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id, discKind: "dvd", fingerprint,
+        volumeLabel: `SYNTHETIC_REVIEW_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      return access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: join(current.originalsLibraryPath, `${fingerprint}.iso`),
+        fingerprint,
+      });
+    });
+  } finally {
+    vi.useRealTimers();
+    access.close();
+  }
 }
 
 export function markArchiveWithDvdRecoveryEvidence(

@@ -3,6 +3,7 @@ import { runNotifications } from "./notifications.js";
 import { runDamagePreview } from "./damage-preview.js";
 import { readStructuredObject, StructuredInputError } from "./structured-input.js";
 import {
+  CATALOG_REVIEW_PAGE_LIMIT,
   createApplicationOperations,
   DvdDiscVerificationUnavailableError,
   DvdRecoveryResumeUnavailableError,
@@ -26,6 +27,8 @@ import {
   InvalidMutationKeyError,
   InvalidProfileInputError,
   parseMutationKey,
+  parseCatalogReviewCursor,
+  readCatalogReviewPage,
   inspectOperationsWithArtifacts,
   isOperationKind,
   isWaitableKind,
@@ -59,6 +62,7 @@ import {
   StaleArchiveRecoveryAttemptError,
   StaleArchiveRecoveryCheckpointError,
   validateEncodeQueueSearchQuery,
+  type CatalogReviewArchiveListCursor,
   type OriginalDiscArchiveId,
   type FilesystemVerificationTarget,
   type DataAccess,
@@ -304,11 +308,12 @@ const commandDefinitions = [
   },
   {
     name: "catalog-review",
-    description: "Inspect or change a Catalog Review and review Mapping Proposals or Title Damage evidence.",
-    usage: "rip-dvd catalog-review <show|damage|preview-damage-acceptance|accept-damage|preview-withdrawal|withdraw-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
+    description: "List pending Catalog Reviews, inspect or change a Catalog Review, and review Mapping Proposals or Title Damage evidence.",
+    usage: "rip-dvd catalog-review list [--cursor <cursor>] | rip-dvd catalog-review <show|damage|preview-damage-acceptance|accept-damage|preview-withdrawal|withdraw-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive> <archive-id> [options]",
     inputs: {
-      arguments: ["show|damage|preview-damage-acceptance|accept-damage|preview-withdrawal|withdraw-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id"],
+      arguments: ["list|show|damage|preview-damage-acceptance|accept-damage|preview-withdrawal|withdraw-damage|suggest|archive-only|reopen|apply-proposal|preview-completion|complete|preview-rearchive-proposal|save-rearchive-proposal|preview-rearchive-acceptance|accept-rearchive", "archive-id (except list)"],
       options: [
+        "list: --cursor <cursor>",
         "show: --selection-offset, --correction-offset, --correction-job-offset, --correction-output-offset, --replacement-offset, --replacement-profile-offset",
         "damage: --limit <1..100> --cursor <cursor>",
         "preview-damage-acceptance: flags or exactly one of --json <object>, --stdin, --file <path>; flags are --exclude-title-identity <id> and --resolve-main-feature <disc-selection-id> <title-identity-id> (repeatable)",
@@ -550,7 +555,7 @@ async function runDvdRecoveryRangesCommand(
   io: CommandIO,
 ) {
   const [archiveRecoveryId, ...optionArgs] = args;
-  const options = profileOptions(
+  const options = parseNamedOptions(
     optionArgs,
     ["--limit", "--cursor"],
     "Invalid Archive Recovery range options.",
@@ -1489,12 +1494,21 @@ function nonnegativeInteger(value: string | undefined): number | null {
 }
 
 function reviewArguments(rest: readonly string[]):
+  | { action: "list"; cursor?: CatalogReviewArchiveListCursor }
   | { action: "show"; id: OriginalDiscArchiveId; coordinates: CatalogReviewPageCoordinates }
   | { action: "damage"; id: OriginalDiscArchiveId; options: { limit?: number; cursor?: string } }
   | { action: "suggest"; id: OriginalDiscArchiveId; selection?: CatalogMetadataSelection } {
   const [action, id, ...options] = rest;
+  if (action === "list") {
+    const parsed = parseNamedOptions(rest.slice(1), ["--cursor"], "Invalid Catalog Review list options.");
+    const cursor = parseCatalogReviewCursor(parsed.get("--cursor") ?? null);
+    if (cursor === null) {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Invalid Catalog Review cursor.", 2);
+    }
+    return { action, cursor };
+  }
   if (action !== "show" && action !== "damage" && action !== "suggest") {
-    throw new CommandFailure("INVALID_ARGUMENTS", "Expected catalog-review show, damage, or suggest.", 2);
+    throw new CommandFailure("INVALID_ARGUMENTS", "Unknown Catalog Review action.", 2);
   }
   if (!id || id.trim().length === 0 || id.length > 256) {
     throw new CommandFailure("INVALID_ARGUMENTS", "A valid archive ID is required.", 2);
@@ -1588,6 +1602,27 @@ async function runCatalogReview(rest: readonly string[], io: CommandIO) {
   let access: DataAccess | undefined;
   try {
     access = io.openAccess();
+    if (input.action === "list") {
+      return access.readConsistentSnapshot((snapshot) => {
+        const { items, page } = readCatalogReviewPage(snapshot, {
+          view: "needs_review",
+          limit: CATALOG_REVIEW_PAGE_LIMIT,
+          cursor: input.cursor,
+        });
+        return {
+          schemaVersion: 1,
+          items: items.map((archive) => ({
+            id: archive.id,
+            discLabel: archive.discLabel,
+            discKind: archive.discKind,
+            archiveFormat: archive.archiveFormat,
+            archivedAt: archive.archivedAt.toISOString(),
+            catalogReviewOutcome: archive.catalogReviewOutcome,
+          })),
+          ...(page === undefined ? {} : { page }),
+        };
+      });
+    }
     const operations = createApplicationOperations(access);
     if (input.action === "damage") {
       return operations.inspectCatalogTitleDamage(input.id, input.options);
@@ -1885,7 +1920,7 @@ const profileCommands = commandDefinitions.filter(
   (definition) => "category" in definition && definition.category === "encoding_profile",
 );
 
-function profileOptions(args: readonly string[], allowed: readonly string[], invalidMessage = "Invalid Encoding Profile options."): Map<string, string> {
+function parseNamedOptions(args: readonly string[], allowed: readonly string[], invalidMessage: string): Map<string, string> {
   const options = new Map<string, string>();
   for (let index = 0; index < args.length;) {
     const name = args[index]!;
@@ -1924,7 +1959,7 @@ function runProfileCommand(name: string, args: readonly string[], openAccess: Co
     throw new CommandFailure("UNKNOWN_COMMAND", "Unknown command.", 2);
   }
   const allowedOptions: readonly string[] = definition.inputs.options;
-  const options = profileOptions(args, allowedOptions);
+  const options = parseNamedOptions(args, allowedOptions, "Invalid Encoding Profile options.");
   const mutationKey = allowedOptions.includes("--key")
     ? mutationKeyFromOptions(options) : undefined;
   let access: DataAccess | undefined;
@@ -2387,7 +2422,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         return 0;
       }
       const id = rest[0]?.startsWith("--") ? undefined : rest[0];
-      const options = profileOptions(id === undefined ? rest : rest.slice(1), ["--offset"], "Invalid readiness options.");
+      const options = parseNamedOptions(id === undefined ? rest : rest.slice(1), ["--offset"], "Invalid readiness options.");
       if ((id !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id) || options.size > 0)) ||
           (options.has("--offset") && !/^(0|[1-9][0-9]{0,14})$/.test(options.get("--offset")!))) {
         throw new CommandFailure("INVALID_ARGUMENTS", "Invalid readiness arguments.", 2);
@@ -2417,7 +2452,7 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         emit(io.stdout, help(name));
       } else {
         const [id, ...args] = rest;
-        const options = profileOptions(args, ["--limit", "--cursor"], "Invalid archive evidence options.");
+        const options = parseNamedOptions(args, ["--limit", "--cursor"], "Invalid archive evidence options.");
         if (!id) throw new CommandFailure("INVALID_ARGUMENTS", "Archive ID is required.", 2);
         const access = io.openAccess();
         try {

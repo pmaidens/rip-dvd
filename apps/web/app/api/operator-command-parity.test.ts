@@ -46,6 +46,7 @@ import {
   createOperatorWorkflowFixture,
   markArchiveWithDvdRecoveryEvidence,
   seedCatalogReviewForReadFixture,
+  seedCatalogReviewQueue,
   seedRearchiveCatalogReviewFixture,
 } from "../../../operator-cli/src/operator-workflow.test-support.js";
 import {
@@ -84,11 +85,56 @@ import {
 import {
   createFilesystemVerificationInventoryRoute,
 } from "./filesystem-verification/route";
-import { readDashboardSnapshot } from "../../lib/dashboard";
+import { readDashboardSnapshot, type DashboardSnapshot } from "../../lib/dashboard";
 
 const trustedOrigin = "http://localhost:3000";
 
 afterEach(() => vi.useRealTimers());
+
+it("shares the pending Catalog Review order and page cursors with the CLI", async () => {
+  const fixture = createOperatorWorkflowFixture();
+  try {
+    seedCatalogReviewQueue(fixture, 22);
+    const access = fixture.openAccess();
+    try {
+      const readPage = async (cursor?: string) => {
+        const url = new URL("/api/dashboard", trustedOrigin);
+        const args = ["catalog-review", "list"];
+        if (cursor !== undefined) {
+          url.searchParams.set("catalogReviewCursor", cursor);
+          args.push("--cursor", cursor);
+        }
+        const response = createDashboardRoute(() => access, new Request(url));
+        expect(response.status).toBe(200);
+        const { catalogReview }: DashboardSnapshot = await response.json();
+        if (catalogReview.status !== "loaded") throw new Error("Expected Catalog Review list");
+        const cli = await fixture.run(args);
+        expect(cli.exitCode).toBe(0);
+        expect(cli.result).toEqual({
+          schemaVersion: 1,
+          items: catalogReview.items.map(({
+            id, discLabel, discKind, archiveFormat, archivedAt, catalogReviewOutcome,
+          }) => ({ id, discLabel, discKind, archiveFormat, archivedAt, catalogReviewOutcome })),
+          page: catalogReview.page,
+        });
+        return catalogReview;
+      };
+
+      const first = await readPage();
+      expect(first.items).toHaveLength(20);
+      expect(first.page?.nextCursor).toEqual(expect.any(String));
+      const second = await readPage(first.page!.nextCursor!);
+      expect(second.items).toHaveLength(2);
+      expect(await readPage(first.page!.nextCursor!.toUpperCase())).toEqual(second);
+      expect(second.page?.previousCursor).toEqual(expect.any(String));
+      expect(await readPage(second.page!.previousCursor!)).toEqual(first);
+    } finally {
+      access.close();
+    }
+  } finally {
+    fixture.dispose();
+  }
+});
 
 it("keeps archive-only and reopen choices identical through web and CLI", async () => {
   const fixture = createOperatorWorkflowFixture();
