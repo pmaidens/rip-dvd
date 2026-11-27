@@ -7509,7 +7509,9 @@ export function createDataAccessInternal(
     const source = currentDvdArchiveSource(database, eq(discInspections.detectedDiscId, detectedDiscId));
     if (!source || source.totalBytes === null) return null;
     const active = matchingActiveArchiveRequestsOnOtherDrives(database, source.disc, source.totalBytes);
-    if (active.length > 1) return null;
+    if (active.length > 1) {
+      throw new DomainInvariantError("Disc identity matches multiple active Archive Requests");
+    }
     return active[0]?.request ??
       latestMatchingCancelledArchiveRequest(database, source.disc, source.totalBytes);
   }
@@ -7541,17 +7543,20 @@ export function createDataAccessInternal(
       )
       .limit(1)
       .get()?.request;
-    const matchingRequest = findMatchingArchiveRequestOnOtherDrive(detectedDiscId) ?? undefined;
-    const relevantRequest = [ownedRequest, attemptedRequest, matchingRequest].filter(
+    const isActive = (request: ArchiveRequest) =>
+      !["fulfilled", "cancelled"].includes(request.status);
+    const localRequests = [ownedRequest, attemptedRequest].filter(
       (request): request is NonNullable<typeof request> =>
         request !== undefined,
-    ).sort((left, right) => {
-      const leftIsActive = !["fulfilled", "cancelled"].includes(
-        left.status,
-      );
-      const rightIsActive = !["fulfilled", "cancelled"].includes(
-        right.status,
-      );
+    );
+    const matchingRequest = localRequests.some(isActive)
+      ? null
+      : findMatchingArchiveRequestOnOtherDrive(detectedDiscId);
+    const relevantRequest = (matchingRequest === null
+      ? localRequests
+      : [...localRequests, matchingRequest]).sort((left, right) => {
+      const leftIsActive = isActive(left);
+      const rightIsActive = isActive(right);
       if (leftIsActive !== rightIsActive) {
         return leftIsActive ? -1 : 1;
       }

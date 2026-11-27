@@ -110,6 +110,21 @@ describe("database-backed dashboard over HTTP", () => {
         })]),
       });
       await expectRequest("needs_attention", "Retry archive", false);
+      const snapshotWithClosedEvidence = withSnapshotOverrides(access, {
+        archiveRequests: {
+          findRelevantForDetectedDisc(id) {
+            const currentRequest = access.archiveRequests.findRelevantForDetectedDisc(id);
+            return currentRequest ? { ...currentRequest, evidenceFormat: "dvd-recovery-evidence-v1" } : null;
+          },
+        },
+      });
+      const legacy = (await createDashboardResponse(snapshotWithClosedEvidence).json()) as DashboardSnapshot;
+      expect(legacy.detectedDiscs).toMatchObject({
+        status: "loaded",
+        items: [{ id: current.disc.id, archiveRequest: { id: request!.id, retryBlocked: true } }],
+      });
+      expect(renderToStaticMarkup(<DashboardView state={legacy} section="discs" />))
+        .not.toContain("Retry archive");
       expect(await fixture.run(["cancel-archive-request", "--key", "synthetic-automatic-cancel", "--archive-request-id", request!.id]))
         .toMatchObject({ exitCode: 0 });
       await expectRequest("cancelled", "Request archive again", true);
@@ -128,6 +143,48 @@ describe("database-backed dashboard over HTTP", () => {
       access.close();
       fixture.dispose();
     }
+  });
+
+  it("keeps other disc controls available when one request identity is undecidable", async () => {
+    const access = dataAccessFixture.create();
+    const inspectDvd = (suffix: string) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/synthetic-unavailable-${suffix}`, isEnabled: true, isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id, discKind: "dvd",
+        fingerprint: `synthetic-archive-${suffix}`, volumeLabel: `SYNTHETIC_${suffix}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      completeDiscInspection(access, disc, `synthetic-generation-${suffix}`);
+      return disc;
+    };
+    const affected = inspectDvd("affected");
+    const other = inspectDvd("other");
+    const request = access.archiveRequests.create({ detectedDiscId: other.id });
+    const response = createDashboardResponse(withSnapshotOverrides(access, {
+      archiveRequests: {
+        findRelevantForDetectedDisc(id) {
+          if (id === affected.id) throw new Error("Synthetic ambiguous Archive Request identity");
+          return access.archiveRequests.findRelevantForDetectedDisc(id);
+        },
+      },
+    }));
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    expect(dashboard.detectedDiscs).toMatchObject({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({ id: affected.id, archiveRequestUnavailable: true }),
+        expect.objectContaining({
+          id: other.id,
+          archiveRequest: expect.objectContaining({ id: request.id, status: "pending" }),
+        }),
+      ]),
+    });
+    const html = renderToStaticMarkup(<DashboardView state={dashboard} section="discs" />);
+    expect(html).toContain("Archive Request status is unavailable.");
+    expect(html).toContain("Cancel request");
+    expect(html).not.toContain("Request archive");
   });
 
   it("projects a running Archive Request onto a matching Detected Disc in another Optical Drive", async () => {

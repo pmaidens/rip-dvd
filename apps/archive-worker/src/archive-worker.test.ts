@@ -1522,7 +1522,7 @@ describe("automatic Archive Request admission", () => {
     }
   });
 
-  it("continues scheduled work on other drives when retained identity history exceeds the lookup limit", async () => {
+  it.each([false, true])("continues scheduled work despite oversized identity history, local request=%s", async (hasLocalRequest) => {
     const fixture = automaticArchivingFixture();
     const { access, copyRunner, databasePath, first, second, originalsLibraryPath } = fixture;
     const stoppedFingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
@@ -1532,7 +1532,11 @@ describe("automatic Archive Request admission", () => {
       fixture.insert(second, queuedFingerprint);
       await fixture.poll();
       const queued = access.catalog.listDetectedDiscs().find(({ fingerprint }) => fingerprint === queuedFingerprint)!;
-      const request = access.archiveRequests.create({ detectedDiscId: queued.id });
+      const request = access.archiveRequests.create({ detectedDiscId: queued.id, priority: 1 });
+      const stopped = access.catalog.listDetectedDiscs().find(({ fingerprint }) => fingerprint === stoppedFingerprint)!;
+      const localRequest = hasLocalRequest
+        ? access.archiveRequests.create({ detectedDiscId: stopped.id, priority: 9 })
+        : null;
 
       const sqlite = new DatabaseSync(databasePath);
       try {
@@ -1561,9 +1565,10 @@ describe("automatic Archive Request admission", () => {
 
       fixture.set(true);
       await fixture.poll({ copyRunner, originalsLibraryPath });
-      expect(access.archiveJobs.list()).toEqual([
-        expect.objectContaining({ archiveRequestId: request.id, status: "completed" }),
-      ]);
+      expect(copyRunner.copy.mock.calls.map(([options]) => options.devicePath))
+        .toEqual(hasLocalRequest ? [first, second] : [second]);
+      expect(access.archiveRequests.find(request.id)?.status).toBe("fulfilled");
+      if (localRequest) expect(access.archiveRequests.find(localRequest.id)?.status).toBe("fulfilled");
       expect(access.archiveRequests.list(["pending"])).toEqual([]);
     } finally {
       fixture.close();
