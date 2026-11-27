@@ -92,6 +92,9 @@ printf '%s\n' "$help_output" | assert_json_fields \
 claim_inventory="$(invoke inspect encode-jobs)"
 printf '%s\n' "$claim_inventory" | assert_json_fields 'schemaVersion=1' 'kind=encode-jobs' 'items.length=0'
 
+catalog_review_queue="$(invoke catalog-review list)"
+printf '%s\n' "$catalog_review_queue" | assert_json_fields 'schemaVersion=1' 'items.length=0'
+
 readiness_help="$(invoke help encode-readiness)"
 printf '%s\n' "$readiness_help" | assert_json_fields 'schemaVersion=1'
 readiness_choices="$(invoke encode-readiness)"

@@ -1,3 +1,4 @@
+import { CATALOG_REVIEW_PAGE_LIMIT } from "@rip-dvd/application";
 import type {
   CatalogReviewArchiveListCursor,
   DataAccess,
@@ -87,6 +88,7 @@ export function createDashboardEventResponse(
         }
         const snapshot = readDashboardSnapshot(access, {
           activityLimit: DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+          catalogReviewLimit: CATALOG_REVIEW_PAGE_LIMIT,
           catalogReviewCursor,
           catalogReviewView: catalogReviewFilters.view,
           catalogReviewQuery: catalogReviewFilters.query,

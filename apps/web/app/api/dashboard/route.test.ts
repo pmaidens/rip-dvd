@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createDashboardResponse, createDashboardRoute } from "./route";
 import {
@@ -10,7 +10,10 @@ import {
 const dataAccessFixture = useDataAccessFixture();
 
 describe("GET /api/dashboard", () => {
-  it("visits every pending catalog review once when a visible review completes", async () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("pages through pending catalog reviews newest first as reviews complete", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -18,6 +21,7 @@ describe("GET /api/dashboard", () => {
     });
     const archives = [];
     for (let index = 0; index < 21; index += 1) {
+      vi.setSystemTime(new Date(Date.UTC(2026, 0, 1, 0, index)));
       const fingerprint = `pending-review-${index}`;
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
@@ -112,27 +116,14 @@ describe("GET /api/dashboard", () => {
       ...first.catalogReview.items.map((item: { id: string }) => item.id),
       ...second.catalogReview.items.map((item: { id: string }) => item.id),
     ];
-    expect(new Set(visitedIds)).toHaveLength(21);
-    expect(new Set(visitedIds)).toEqual(
-      new Set(archives.map((archive) => archive.id)),
-    );
-    expect(
-      new Set(
-        previous.catalogReview.items.map((item: { id: string }) => item.id),
-      ),
-    ).toEqual(
-      new Set(
-        first.catalogReview.items
-          .map((item: { id: string }) => item.id)
-          .filter(
-            (id: string) =>
-              id !== completedArchive.id && id !== finalArchive.id,
-          ),
-      ),
-    );
+    const newestFirst = archives.map(({ id }) => id).reverse();
+    expect(visitedIds).toEqual(newestFirst);
+    expect(previous.catalogReview.items.map((item: { id: string }) => item.id))
+      .toEqual(newestFirst.slice(1, -1));
   });
 
   it("keeps Reviewed paging stable when an archive returns to Needs review", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -140,6 +131,7 @@ describe("GET /api/dashboard", () => {
     });
     const archives = [];
     for (let index = 0; index < 21; index += 1) {
+      vi.setSystemTime(new Date(Date.UTC(2026, 0, 1, 0, index)));
       const fingerprint = `reviewed-page-${index}`;
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
@@ -203,6 +195,8 @@ describe("GET /api/dashboard", () => {
 
     expect(first.catalogReview.items).toHaveLength(20);
     expect(second.catalogReview.items).toHaveLength(1);
+    expect(first.catalogReview.items.map((item: { id: string }) => item.id))
+      .toEqual(archives.slice(1).map(({ id }) => id));
     expect(refreshedSecond.catalogReview).toEqual({
       status: "loaded",
       items: [],

@@ -120,6 +120,7 @@ library configuration as the application. Commands write one JSON result to
 stdout. Invalid input exits 2; an unavailable read exits 1.
 
 ```sh
+rip-dvd catalog-review list [--cursor <cursor>]
 rip-dvd catalog-review show <archive-id>
 rip-dvd catalog-review damage <archive-id> [--limit 100] [--cursor <cursor>]
 rip-dvd catalog-review preview-damage-acceptance <archive-id> [--exclude-title-identity <id> ...] [--resolve-main-feature <disc-selection-id> <title-identity-id> ...]
@@ -134,6 +135,10 @@ rip-dvd catalog-review reopen <archive-id> --key <key> --revision <catalog-revis
 rip-dvd catalog-review suggest <archive-id>
 rip-dvd catalog-review suggest <archive-id> --tmdb-id 42 --media-type movie
 ```
+
+`list` returns pending Catalog Reviews, with the newest Original Disc Archive
+first. Use `page.nextCursor` or `page.previousCursor` with `--cursor` when
+the response includes another page.
 
 `show` returns the current catalog revision, archive and scan provenance,
 coverage, Media Items, Disc Selections with structured action availability,

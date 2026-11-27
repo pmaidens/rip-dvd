@@ -34,7 +34,7 @@ import {
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 import { runCommand } from "./command.js";
-import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture } from "./operator-workflow.test-support.js";
+import { createOperatorWorkflowFixture, seedCatalogReviewForReadFixture, seedCatalogReviewQueue } from "./operator-workflow.test-support.js";
 
 const fixtures: ReturnType<typeof createOperatorWorkflowFixture>[] = [];
 
@@ -92,6 +92,31 @@ it("reports database health as JSON through the public command runner", async ()
     journalMode: "wal",
     busyTimeoutMs: 5_000,
   });
+});
+
+it("lists only pending Catalog Reviews in descending archive time", async () => {
+  const current = fixture();
+  const [oldest, newestPending, reviewed] = seedCatalogReviewQueue(current, 3);
+  const access = current.openAccess();
+  try {
+    access.catalog.completeCatalogReview(reviewed!.id, reviewed!.updatedAt, "archive_only");
+  } finally {
+    access.close();
+  }
+
+  const listed = await current.run(["catalog-review", "list"]);
+  expect(listed.exitCode).toBe(0);
+  expect(listed.result).toMatchObject({
+    schemaVersion: 1,
+    items: [
+      { id: newestPending!.id, discLabel: "SYNTHETIC_REVIEW_1", archivedAt: "2026-01-01T00:01:00.000Z" },
+      { id: oldest!.id, discLabel: "SYNTHETIC_REVIEW_0", archivedAt: "2026-01-01T00:00:00.000Z" },
+    ],
+  });
+
+  const invalid = await current.run(["catalog-review", "list", "--cursor", "invalid"]);
+  expect(invalid.exitCode).toBe(2);
+  expect(invalid.result).toMatchObject({ error: { code: "INVALID_ARGUMENTS" } });
 });
 
 it("inspects a persisted canonical Encode Output by artifact identity", async () => {

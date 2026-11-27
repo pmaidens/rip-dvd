@@ -5,6 +5,8 @@ import {
   type ArchiveJobTiming,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
+  parseCatalogReviewCursor,
+  readCatalogReviewPage,
   readMediaItemsWithAncestors,
 } from "@rip-dvd/application";
 import { createHash } from "node:crypto";
@@ -346,6 +348,7 @@ export interface DashboardSnapshot {
 
 export interface DashboardSnapshotOptions {
   activityLimit?: number;
+  catalogReviewLimit?: number;
   catalogReviewCursor?: CatalogReviewArchiveListCursor;
   catalogReviewView?: CatalogReviewArchiveView;
   catalogReviewQuery?: string;
@@ -360,42 +363,12 @@ export interface DashboardCatalogReviewFilters {
   outcome?: CompletedCatalogReviewOutcome;
 }
 
-const CATALOG_REVIEW_CURSOR_PATTERN =
-  /^v1\.(newer|older)(-inclusive)?\.(\d{1,16})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
-
-function encodeCatalogReviewCursor(
-  direction: CatalogReviewArchiveListCursor["direction"],
-  archive: Pick<OriginalDiscArchive, "archivedAt" | "id">,
-  inclusive = false,
-): string {
-  return `v1.${direction}${inclusive ? "-inclusive" : ""}.${archive.archivedAt.getTime()}.${archive.id}`;
-}
-
 export function parseDashboardCatalogReviewCursor(
   request: Request,
 ): CatalogReviewArchiveListCursor | null | undefined {
-  const value = new URL(request.url).searchParams.get("catalogReviewCursor");
-  if (value === null) {
-    return undefined;
-  }
-  const match = CATALOG_REVIEW_CURSOR_PATTERN.exec(value);
-  if (!match) {
-    return null;
-  }
-  const archivedAtMilliseconds = Number(match[3]);
-  const archivedAt = new Date(archivedAtMilliseconds);
-  if (
-    !Number.isSafeInteger(archivedAtMilliseconds) ||
-    Number.isNaN(archivedAt.getTime())
-  ) {
-    return null;
-  }
-  return {
-    direction: match[1] as CatalogReviewArchiveListCursor["direction"],
-    archivedAt,
-    id: match[4] as OriginalDiscArchiveId,
-    ...(match[2] === undefined ? {} : { inclusive: true }),
-  };
+  return parseCatalogReviewCursor(
+    new URL(request.url).searchParams.get("catalogReviewCursor"),
+  );
 }
 
 export function parseDashboardCatalogReviewFilters(
@@ -1371,6 +1344,7 @@ function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
   {
     activityLimit,
+    catalogReviewLimit = activityLimit,
     catalogReviewCursor,
     catalogReviewView = "needs_review",
     catalogReviewQuery,
@@ -1573,28 +1547,17 @@ function readDashboardSnapshotRecords(
         )
   );
   const archiveSource = readSource(() =>
-    access.catalog.listCatalogReviewArchives({
+    readCatalogReviewPage(access, {
       view: catalogReviewView,
-      limit: activityLimit === undefined ? 100 : activityLimit + 1,
-      ...(catalogReviewCursor === undefined
-        ? {}
-        : { cursor: catalogReviewCursor }),
-      ...(catalogReviewQuery === undefined
-        ? {}
-        : { query: catalogReviewQuery }),
-      ...(catalogReviewOutcome === undefined
-        ? {}
-        : { outcome: catalogReviewOutcome }),
+      limit: catalogReviewLimit,
+      cursor: catalogReviewCursor,
+      query: catalogReviewQuery,
+      outcome: catalogReviewOutcome,
     }),
   );
-  const persistedCatalogReviewArchives =
-    archiveSource.status === "loaded" && activityLimit !== undefined
-      ? catalogReviewCursor?.direction === "newer"
-        ? archiveSource.value.slice(0, activityLimit)
-        : archiveSource.value.slice(-activityLimit)
-      : archiveSource.status === "loaded"
-        ? archiveSource.value
-        : [];
+  const persistedCatalogReviewArchives = archiveSource.status === "loaded"
+    ? archiveSource.value.items
+    : [];
   const relevantSelectionIds = encodeJobSource.status === "error"
     ? []
     : encodeJobSource.value.map((job) => job.discSelectionId);
@@ -1693,16 +1656,6 @@ function readDashboardSnapshotRecords(
       }));
     })()
   );
-  const previousCatalogReviewBoundary =
-    catalogReviewArchives.at(-1) ??
-    (catalogReviewCursor?.direction === "older"
-      ? catalogReviewCursor
-      : undefined);
-  const nextCatalogReviewBoundary =
-    catalogReviewArchives[0] ??
-    (catalogReviewCursor?.direction === "newer"
-      ? catalogReviewCursor
-      : undefined);
   const rearchiveRequestSource = readSource(() =>
     access.archiveRequests.listForRearchiveSources(
       catalogReviewArchives.map((archive) => archive.id),
@@ -2469,38 +2422,9 @@ function readDashboardSnapshotRecords(
                   },
             };
           }),
-          ...(activityLimit !== undefined &&
-          (catalogReviewView === "reviewed" ||
-            catalogReviewCursor !== undefined ||
-            archiveSource.value.length > activityLimit)
-            ? {
-                page: {
-                  limit: activityLimit,
-                  previousCursor:
-                    (catalogReviewCursor?.direction === "newer"
-                      ? archiveSource.value.length > activityLimit
-                      : catalogReviewCursor !== undefined) &&
-                    previousCatalogReviewBoundary !== undefined
-                      ? encodeCatalogReviewCursor(
-                          "newer",
-                          previousCatalogReviewBoundary,
-                          catalogReviewArchives.length === 0,
-                        )
-                      : null,
-                  nextCursor:
-                    (catalogReviewCursor?.direction === "newer"
-                      ? catalogReviewCursor !== undefined
-                      : archiveSource.value.length > activityLimit) &&
-                    nextCatalogReviewBoundary !== undefined
-                      ? encodeCatalogReviewCursor(
-                          "older",
-                          nextCatalogReviewBoundary,
-                          catalogReviewArchives.length === 0,
-                        )
-                      : null,
-                },
-              }
-            : {}),
+          ...(archiveSource.value.page === undefined
+            ? {}
+            : { page: archiveSource.value.page }),
         };
 
   return {
