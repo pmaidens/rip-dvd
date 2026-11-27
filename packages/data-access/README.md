@@ -320,11 +320,14 @@ it after the worker observes the drive and resets the consecutive budget.
 Lifetime attempts are preserved. Removal and replacement after settlement
 abort rather than fail.
 
-`archiveRequests.create()` atomically approves a scanned Detected Disc and
-records durable intent without creating an Archive Job. Pending requests wait
-indefinitely. Failure moves a request to `needs_attention`; manual retry returns
-it to `pending`; cancellation either completes immediately or enters
-`cancellation_requested` until active external work stops.
+`archiveRequests.create()` atomically approves a scanned Detected Disc when it
+records a new Archive Request. Reusing verified work across drives preserves
+the original request and its owning Detected Disc. An explicit
+`catalog.updateDetectedDiscStatus(id, "approved")` also approves the supplied
+disc when it reuses a request. The Archive Worker creates Archive Jobs separately.
+Pending requests wait indefinitely. Failure moves a request to `needs_attention`.
+Manual retry returns it to `pending`. Cancellation either completes immediately
+or enters `cancellation_requested` until active external work stops.
 
 Running Encode Job cancellation first persists Cancellation requested while
 retaining the active attempt token. Lease renewal returns that state to the

@@ -235,6 +235,7 @@ export const detectedDiscs = sqliteTable(
       table.opticalDriveId,
       table.fingerprint,
     ),
+    index("detected_discs_fingerprint_idx").on(table.fingerprint),
     index("detected_discs_status_idx").on(table.status),
     check(
       "detected_discs_kind_check",
@@ -419,6 +420,25 @@ export const discInspectionAttempts = sqliteTable(
   ],
 );
 
+export const archivingSettings = sqliteTable(
+  "archiving_settings",
+  {
+    id: integer("id").primaryKey(),
+    automaticallyArchiveInsertedDvds: integer(
+      "automatically_archive_inserted_dvds",
+      { mode: "boolean" },
+    ).notNull(),
+  },
+  (table) => [
+    check("archiving_settings_id_not_null", sql`${table.id} is not null`),
+    check("archiving_settings_singleton", sql`${table.id} = 1`),
+    check(
+      "archiving_settings_automatic_dvds_boolean",
+      sql`${table.automaticallyArchiveInsertedDvds} in (0, 1)`,
+    ),
+  ],
+);
+
 export const archiveRequests = sqliteTable(
   "archive_requests",
   {
@@ -435,6 +455,7 @@ export const archiveRequests = sqliteTable(
     evidenceFormat: text("evidence_format", {
       enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
     }).$type<DvdArchiveEvidenceFormat>(),
+    origin: text("origin", { enum: ["manual", "automatic"] }),
     status: text("status", { enum: ARCHIVE_REQUEST_STATUSES })
       .notNull()
       .default("pending"),
@@ -455,6 +476,9 @@ export const archiveRequests = sqliteTable(
     index("archive_requests_disc_created_idx").on(
       table.detectedDiscId, table.createdAt, table.id,
     ),
+    index("archive_requests_cancelled_disc_updated_idx")
+      .on(table.detectedDiscId, table.updatedAt, table.id)
+      .where(sql`${table.status} = 'cancelled'`),
     index("archive_requests_rearchive_source_idx").on(
       table.rearchiveSourceArchiveId,
       table.createdAt,

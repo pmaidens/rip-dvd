@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 
-import type { DataAccess } from "@rip-dvd/data-access";
+import { DomainInvariantError, type DataAccess } from "@rip-dvd/data-access";
 
 import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { runArchiveJob } from "./archive-job-runner.js";
@@ -116,11 +116,14 @@ function prioritizeDrivesWithPendingRequests<
     ) {
       continue;
     }
-    const request = access.archiveRequests.listRelevantForDetectedDiscs([
-      inspection.detectedDiscId,
-    ])[0];
-    if (request?.status === "pending") {
-      priorityByDriveId.set(inspection.opticalDriveId, request.priority);
+    try {
+      const request = access.archiveRequests.findRelevantForDetectedDisc(inspection.detectedDiscId);
+      if (request?.status === "pending") {
+        priorityByDriveId.set(inspection.opticalDriveId, request.priority);
+      }
+    } catch (error) {
+      // Leave ambiguous identity evidence to the individual drive's poll.
+      if (!(error instanceof DomainInvariantError)) throw error;
     }
   }
   return drives
@@ -294,11 +297,20 @@ async function pollArchiveWorkerWithDriveAdmission(
         signal,
         waitForNextSettlingObservation,
       });
+      signal.throwIfAborted();
+      if (completed === null) {
+        return;
+      }
       if (
-        completed === null ||
-        copyRunner === undefined ||
-        originalsLibraryPath === undefined
+        completed.observedCapacityBytes !== null &&
+        completed.observedCapacityBytes === completed.inspection.totalBytes
       ) {
+        access.archiveRequests.admitAutomatically({
+          inspectionId: completed.inspection.id,
+          mediaGeneration: completed.mediaGeneration,
+        });
+      }
+      if (copyRunner === undefined || originalsLibraryPath === undefined) {
         return;
       }
       const detectedDiscId = completed.inspection.detectedDiscId;

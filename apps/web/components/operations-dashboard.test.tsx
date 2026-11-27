@@ -943,6 +943,7 @@ describe("DashboardView", () => {
             volumeLabel: "MY_MOVIE",
             discKind: "dvd",
             status: "scanned",
+            canRequestArchive: true,
             opticalDriveName: "Upper drive",
             fingerprint: "sha256:reviewable-disc",
             titles: [
@@ -2491,6 +2492,7 @@ function mutationDashboardState(
           volumeLabel: "READY_TO_ARCHIVE",
           discKind: "dvd",
           status: cancelledArchiveRequest ? "approved" : "scanned",
+          canRequestArchive: true,
           opticalDriveName: "Upper drive",
           fingerprint: "sha256:ready-to-archive",
           titles: [],

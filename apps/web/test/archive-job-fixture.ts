@@ -98,6 +98,7 @@ export function completeDiscInspection(
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   mediaGeneration: string,
   totalBytes = 2_048,
+  completion: { publishScanned?: true } = {},
 ) {
   const started = beginSettledDiscInspectionForTest(access, {
     opticalDriveId: disc.opticalDriveId,
@@ -116,6 +117,7 @@ export function completeDiscInspection(
   const completed = access.discInspections.record(started.claim!, {
     type: "complete",
     detectedDiscId: disc.id,
+    ...completion,
   });
   started.restoreSystemTime();
   return completed;

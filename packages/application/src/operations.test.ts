@@ -161,7 +161,7 @@ describe("inspectOperations", () => {
       },
       archiveRequests: {
         listForDetectedDisc: vi.fn(() => []),
-        listRelevantForDetectedDiscs: vi.fn(() => []),
+        findRelevantForDetectedDisc: vi.fn(() => null),
       },
       discInspections: { list: vi.fn(() => []) },
       archiveJobs: { list: vi.fn(() => []) },

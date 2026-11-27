@@ -906,6 +906,14 @@ only the admitted preview media. Use `damage-preview inspect <request-id>` for
 completion or failure. Replaying a mutation key returns its original acceptance;
 it does not report later worker completion or perform an unlink in the CLI.
 
+## Automatic DVD archiving
+
+Use `rip-dvd archiving-settings get` to read the deployment setting.
+Set it with `rip-dvd archiving-settings set --key <key> --enabled true`
+or pass `--enabled false` to disable it. The setting defaults to off and
+is shared with Settings → Archiving. Turning it off stops future automatic
+requests. Previously admitted Archive Requests still use the ordinary queue.
+
 ## Damage Preview recreation
 
 `damage-preview recreate <request-id>` reviews retained evidence after media

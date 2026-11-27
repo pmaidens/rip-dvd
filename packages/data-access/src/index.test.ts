@@ -1347,6 +1347,7 @@ describe("data-access facade", () => {
         "archive_recoveries",
         "archive_recovery_work",
         "archive_requests",
+        "archiving_settings",
         "browser_renditions",
         "catalog_review_evidence_choices",
         "disc_inspection_attempts",
@@ -1383,7 +1384,7 @@ describe("data-access facade", () => {
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(57);
+    expect(identifierTables).toHaveLength(58);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "dvd_recovery_storage_preflights"
@@ -2497,52 +2498,8 @@ describe("data-access facade", () => {
     const sqlite = new DatabaseSync(databasePath);
     const migrationsRoot = new URL("../drizzle/", import.meta.url);
     const predecessorNames = readdirSync(migrationsRoot)
-      .filter((name) => /^\d/.test(name))
-      .filter(
-        (name) =>
-          name !== "20260812151540_disc-inspection-archive-requests" &&
-          name !== "20260820215821_redundant_jocasta" &&
-          name !== "20260822142722_disc-inspection-settling" &&
-          name !== "20260822175220_striped_kabuki" &&
-          name !== "20260822183552_bounded-disc-settling" &&
-          name !== "20260822185006_burly_northstar" &&
-          name !== "20260822193801_safe_proteus" &&
-          name !== "20260822201215_thick_madame_web" &&
-          name !== "20260823160205_flat_fixer" &&
-          name !== "20260828154312_luxuriant_human_robot" &&
-          name !== "20260828160945_fancy_chimera" &&
-          name !== "20260828164042_married_lady_ursula" &&
-          name !== "20260922161825_operation-detail-lookups" &&
-          name !== "20260922174811_rearchive-lineage" &&
-          name !== "20260922182659_rearchive-ordinary-uniqueness" &&
-          name !== "20260930002706_dvd-evidence-compatibility" &&
-          name !== "20260930003106_dvd-evidence-authority" &&
-          name !== "20260930002622_wandering_micromax" &&
-          name !== "20260930003626_dvd-evidence-checkpoints" &&
-          name !== "20261004053119_scsi-read-path-notice" &&
-          name !== "20261019204228_dvd-initial-save" &&
-          name !== "20261022044144_icy_barracuda" &&
-          name !== "20261022044512_parched_norrin_radd" &&
-          name !== "20261022044526_chilly_madame_hydra" &&
-          name !== "20261022080829_dvd-title-identities" &&
-          name !== "20261022100044_futuristic_cannonball" &&
-          name !== "20261022205917_burly_shard" &&
-          name !== "20261022222723_awesome_cyclops" &&
-          name !== "20261023003003_ambiguous_gwen_stacy" &&
-          name !== "20261023014315_faithful_triton" &&
-          name !== "20261023021122_fearless_morg" &&
-          name !== "20261023052549_simple_harry_osborn" &&
-          name !== "20261023075807_quick_mentor" &&
-          name !== "20261023134137_cynical_leopardon" &&
-          name !== "20261023141501_even_enchantress" &&
-          name !== "20261024175458_nappy_black_tom" &&
-          name !== "20261024185350_archive-recovery-resume" &&
-          name !== "20261024192300_woozy_wasp" &&
-          name !== "20261028031248_flowery_dorian_gray" &&
-          name !== "20261028062114_huge_korath" &&
-          name !== "20261028075636_flowery_grim_reaper" &&
-          name !== "20261028200703_nervous_zuras",
-      )
+      .filter((name) => /^\d/.test(name) &&
+        name < "20260812151540_disc-inspection-archive-requests")
       .sort();
     for (const migrationName of predecessorNames) {
       const migration = readFileSync(
@@ -10046,10 +10003,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 20",
+          "select name from __drizzle_migrations order by id desc limit 21",
         )
         .all(),
       ).toEqual([
+        { name: "20261127002011_automatic-dvd-archiving" },
         { name: "20261029052209_worthless_gwen_stacy" },
         { name: "20261029042748_elite_gargoyle" },
         { name: "20261028235557_slippery_paladin" },
@@ -14129,7 +14087,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
   });
 
   it("rejects ambiguous matching requests before starting an Archive Job", () => {
-    const access = openTestDatabase();
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
     const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
     const scanData = {
       schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
@@ -14161,7 +14120,18 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const second = completeEvidence("/dev/request-source-2", "generation-2");
     const candidate = completeEvidence("/dev/candidate", "generation-3");
     access.archiveRequests.create({ detectedDiscId: first.disc.id });
-    access.archiveRequests.create({ detectedDiscId: second.disc.id });
+    const legacyWriter = new DatabaseSync(databasePath);
+    try {
+      // Older versions could leave both pending when neither request had run.
+      legacyWriter.prepare("UPDATE detected_discs SET status = 'approved' WHERE id = ?")
+        .run(second.disc.id);
+      legacyWriter.prepare(`
+        INSERT INTO archive_requests (id, detected_disc_id, created_at, updated_at)
+        VALUES ('legacy-ambiguous-request', ?, 1, 1)
+      `).run(second.disc.id);
+    } finally {
+      legacyWriter.close();
+    }
 
     expect(() =>
       access.archiveJobs.startForInspection(

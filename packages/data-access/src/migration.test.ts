@@ -67,6 +67,34 @@ function createMigrationsThrough(lastMigration: string): string {
   return migrationsFolder;
 }
 
+it("defaults upgraded databases to manual archiving and preserves historical Archive Requests", () => {
+  const databasePath = createDatabasePath("rip-dvd-pre-automatic-archiving-");
+  createLegacySidecarDataAccess({
+    databasePath,
+    migrationsFolder: createMigrationsThrough("20261029052209_worthless_gwen_stacy"),
+  }).close();
+  seedEncodeJob(databasePath, "synthetic-pre-automatic");
+  const requestId = "synthetic-historical-request" as ArchiveRequestId;
+  const sqlite = new DatabaseSync(databasePath);
+  try {
+    sqlite.prepare(`
+      INSERT INTO archive_requests (id, detected_disc_id, status, cancelled_at,
+        cancellation_requested_at, created_at, updated_at)
+      VALUES (?, 'synthetic-pre-automatic-disc', 'cancelled', 2, 2, 1, 2)
+    `).run(requestId);
+  } finally {
+    sqlite.close();
+  }
+
+  const upgraded = createDataAccess({ databasePath });
+  try {
+    expect(upgraded.archivingSettings.read()).toEqual({ automaticallyArchiveInsertedDvds: false });
+    expect(upgraded.archiveRequests.find(requestId)).toMatchObject({ status: "cancelled", origin: null });
+  } finally {
+    upgraded.close();
+  }
+});
+
 function seedEncodeJob(
   databasePath: string,
   key: string,

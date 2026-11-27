@@ -395,6 +395,7 @@ export interface ArchiveRequest {
   detectedDiscId: DetectedDiscId;
   rearchiveSourceArchiveId: OriginalDiscArchiveId | null;
   evidenceFormat: DvdArchiveEvidenceFormat | null;
+  origin: "manual" | "automatic" | null;
   status: ArchiveRequestStatus;
   priority: number;
   cancellationRequestedAt: Date | null;
@@ -1981,6 +1982,7 @@ export type DiscInspectionEvent =
   | {
       type: "complete";
       detectedDiscId: DetectedDiscId;
+      publishScanned?: true;
     }
   | {
       type: "fail";
@@ -2614,6 +2616,7 @@ export interface DiscInspectionAccess {
 
 export interface ArchiveRequestAccess {
   find(id: ArchiveRequestId): ArchiveRequest | null;
+  findRelevantForDetectedDisc(id: DetectedDiscId): ArchiveRequest | null;
   listForDetectedDisc(id: DetectedDiscId): ArchiveRequest[];
   listForRearchiveSources(
     ids: readonly OriginalDiscArchiveId[],
@@ -2623,6 +2626,10 @@ export interface ArchiveRequestAccess {
     evidenceFormat?: DvdArchiveEvidenceFormat;
     priority?: number;
   }): ArchiveRequest;
+  admitAutomatically(input: {
+    inspectionId: DiscInspectionId;
+    mediaGeneration: string;
+  }): void;
   submit(input: {
     mutationKey: string;
     detectedDiscId: DetectedDiscId;
@@ -2653,6 +2660,10 @@ export interface ArchiveRequestAccess {
     detectedDiscId: DetectedDiscId,
   ): boolean;
   waitingStatus(id: ArchiveRequestId): ArchiveRequestWaitingStatus | null;
+}
+
+export interface ArchivingSettings {
+  automaticallyArchiveInsertedDvds: boolean;
 }
 
 export interface ArchiveRequestWaitingStatus {
@@ -3077,6 +3088,7 @@ export interface ConsistentReadAccess {
   readonly archiveRequests: Pick<
     ArchiveRequestAccess,
     | "find"
+    | "findRelevantForDetectedDisc"
     | "list"
     | "listForDetectedDisc"
     | "listForRearchiveSources"
@@ -3228,6 +3240,10 @@ export interface DataAccess {
   readonly encodingProfiles: EncodingProfileAccess;
   readonly discInspections: DiscInspectionAccess;
   readonly archiveRequests: ArchiveRequestAccess;
+  readonly archivingSettings: {
+    read(): ArchivingSettings;
+    set(input: ArchivingSettings & { mutationKey: string }): ArchivingSettings;
+  };
   readonly archiveJobs: ArchiveJobAccess;
   readonly archiveRecoveryWork: ArchiveRecoveryWorkAccess;
   readonly encodeJobs: EncodeJobAccess;

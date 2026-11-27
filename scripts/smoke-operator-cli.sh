@@ -89,6 +89,16 @@ help_output="$(invoke)"
 printf '%s\n' "$help_output" | assert_json_fields \
   'schemaVersion=1' 'usage=rip-dvd <command>'
 
+archiving_default="$(invoke archiving-settings get)"
+printf '%s\n' "$archiving_default" | assert_json_fields \
+  'schemaVersion=1' 'automaticallyArchiveInsertedDvds=false'
+archiving_enabled="$(invoke archiving-settings set --key synthetic-smoke-archiving-on --enabled true)"
+printf '%s\n' "$archiving_enabled" | assert_json_fields 'automaticallyArchiveInsertedDvds=true'
+archiving_readback="$(invoke archiving-settings get)"
+printf '%s\n' "$archiving_readback" | assert_json_fields 'automaticallyArchiveInsertedDvds=true'
+archiving_disabled="$(invoke archiving-settings set --key synthetic-smoke-archiving-off --enabled false)"
+printf '%s\n' "$archiving_disabled" | assert_json_fields 'automaticallyArchiveInsertedDvds=false'
+
 claim_inventory="$(invoke inspect encode-jobs)"
 printf '%s\n' "$claim_inventory" | assert_json_fields 'schemaVersion=1' 'kind=encode-jobs' 'items.length=0'
 

@@ -3,6 +3,7 @@ import {
   activeEncodeWorkIdentities,
   archiveRecoveryWorkIdentity,
   createEncodeWorkConflictCurrent,
+  DomainInvariantError,
   DVD_ARCHIVE_EVIDENCE_HEADER_BATCH_LIMIT,
   ENCODE_WORK_CONFLICT,
   DVD_RECOVERY_EVIDENCE_ADMISSION,
@@ -410,6 +411,10 @@ function visibleDisc({ scanData: _scanData, ...disc }: DetectedDisc) {
   return disc;
 }
 
+function visibleArchiveRequest({ origin: _origin, ...request }: ArchiveRequest) {
+  return request;
+}
+
 function visibleIncident(incident: WorkerIncident) {
   return {
     ...incident,
@@ -480,6 +485,12 @@ function recentWork<T extends { status: string; updatedAt: Date; id: string }>(
   ].slice(0, limit);
 }
 
+export function isArchiveRequestRetryable(
+  request: Pick<ArchiveRequest, "status" | "evidenceFormat"> | undefined,
+): boolean {
+  return request?.status === "needs_attention" && request.evidenceFormat === null;
+}
+
 function requestActions(request: ArchiveRequest) {
   if (request.evidenceFormat === DVD_RECOVERY_EVIDENCE_FORMAT) {
     const cancelEligible = ["pending", "running", "needs_attention"].includes(
@@ -504,7 +515,7 @@ function requestActions(request: ArchiveRequest) {
   const reason = `Archive Request is ${request.status}.`;
   return [
     recoveryAction("cancel", ["pending", "running", "needs_attention"].includes(request.status), reason, "archiveRequestId"),
-    recoveryAction("retry", request.status === "needs_attention", reason, "archiveRequestId"),
+    recoveryAction("retry", isArchiveRequestRetryable(request), reason, "archiveRequestId"),
   ];
 }
 
@@ -637,19 +648,40 @@ function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueA
   }];
 }
 
-function detectedDiscActions(disc: DetectedDisc, relevantRequest: ArchiveRequest | null) {
-  const eligible = disc.status === "scanned" ||
-    (disc.status === "approved" && relevantRequest?.status === "cancelled");
-  const reason = relevantRequest && relevantRequest.status !== "cancelled"
-    ? `Archive Request is ${relevantRequest.status}.`
+export function readDetectedDiscArchiveRequest(
+  access: Pick<ConsistentReadAccess, "archiveRequests">,
+  id: DetectedDiscId,
+) {
+  try {
+    return { request: access.archiveRequests.findRelevantForDetectedDisc(id), unavailable: false };
+  } catch (error) {
+    if (!(error instanceof DomainInvariantError)) throw error;
+    return { request: null, unavailable: true };
+  }
+}
+
+export function describeDetectedDiscArchiveAction(
+  disc: Pick<DetectedDisc, "status">,
+  { request, unavailable }: ReturnType<typeof readDetectedDiscArchiveRequest>,
+) {
+  const eligible = !unavailable && ((disc.status === "scanned" &&
+    (request === null || request.status === "cancelled")) ||
+    (disc.status === "approved" && request?.status === "cancelled"));
+  const reason = unavailable
+    ? "Archive Request status is unavailable."
+    : request && request.status !== "cancelled"
+    ? `Archive Request is ${request.status}.`
     : `Detected Disc is ${disc.status}.`;
-  return [{
+  return {
     name: "request-archive",
     eligible,
     requiredInputs: ["mutationKey", "detectedDiscId"],
     reason: eligible ? null : reason,
-    blockingReasons: eligible ? [] : [{ code: "INVALID_TRANSITION", message: reason }],
-  }];
+    blockingReasons: eligible ? [] : [{
+      code: unavailable ? "ARCHIVE_REQUEST_IDENTITY_UNAVAILABLE" : "INVALID_TRANSITION",
+      message: reason,
+    }],
+  };
 }
 
 function activity(access: ConsistentReadAccess, limit: number) {
@@ -717,7 +749,8 @@ function readList(
     case "archive-requests":
       return recentWork(access.archiveRequests.list(undefined, {
         policy: boundedPolicy(limit),
-      }), ["pending", "running", "needs_attention", "cancellation_requested"], limit);
+      }), ["pending", "running", "needs_attention", "cancellation_requested"], limit)
+        .map(visibleArchiveRequest);
     case "archive-jobs":
       return recentWork(access.archiveJobs.list(undefined, {
         policy: boundedPolicy(limit),
@@ -771,8 +804,7 @@ function readDetail(
       const disc = access.catalog.listDetectedDiscs(undefined, { ids: [id as DetectedDiscId] })[0];
       if (!disc) return null;
       const requests = access.archiveRequests.listForDetectedDisc(disc.id);
-      const relevantRequest = access.archiveRequests
-        .listRelevantForDetectedDiscs([disc.id])[0] ?? null;
+      const archiveRequest = readDetectedDiscArchiveRequest(access, disc.id);
       const archives = access.catalog.listOriginalDiscArchives({
         detectedDiscId: disc.id,
       });
@@ -781,15 +813,17 @@ function readDetail(
         ...visibleDisc(disc), scanData: disc.scanData,
         inspections: access.discInspections.list({ detectedDiscId: disc.id })
           .map(visibleInspection),
-        archiveRequests: requests,
-        currentArchiveRequest: relevantRequest,
+        archiveRequests: requests.map(visibleArchiveRequest),
+        ...(archiveRequest.unavailable ? { archiveRequestUnavailable: true } : {}),
+        currentArchiveRequest: archiveRequest.request === null
+          ? null : visibleArchiveRequest(archiveRequest.request),
         archiveJobs: access.archiveJobs.list(undefined, {
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
         archives: archives.map((archive) =>
           visibleArchive(archive, evidenceHeaders)
         ),
-        availableActions: detectedDiscActions(disc, relevantRequest),
+        availableActions: [describeDetectedDiscArchiveAction(disc, archiveRequest)],
       };
     }
     case "disc-inspections": {
@@ -812,7 +846,7 @@ function readDetail(
       const request = access.archiveRequests.find(id as ArchiveRequestId);
       if (!request) return null;
       return {
-        ...request,
+        ...visibleArchiveRequest(request),
         waiting: describeArchiveRequestWaitingStatus(
           access.archiveRequests.waitingStatus(request.id),
         ),
@@ -828,6 +862,7 @@ function readDetail(
     case "archive-jobs": {
       const job = access.archiveJobs.find(id as ArchiveJobId);
       if (!job) return null;
+      const request = access.archiveRequests.find(job.archiveRequestId);
       const archives = job.originalDiscArchiveId === null
         ? []
         : access.catalog.listOriginalDiscArchives({
@@ -839,7 +874,7 @@ function readDetail(
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [job.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
-        archiveRequest: access.archiveRequests.find(job.archiveRequestId),
+        archiveRequest: request === null ? null : visibleArchiveRequest(request),
         discInspection: job.discInspectionId === null ? null :
           access.discInspections.list({ ids: [job.discInspectionId] })
             .map(visibleInspection)[0] ?? null,
@@ -979,7 +1014,7 @@ function readDetail(
             visibleArchive(newArchive, evidenceHeaders)
           ),
           rearchiveRequests: access.archiveRequests
-            .listForRearchiveSources([archive.id]),
+            .listForRearchiveSources([archive.id]).map(visibleArchiveRequest),
         },
         references: {
           discSelections: discSelections.map((selection) => ({
