@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
+import { createOperatorWorkflowFixture } from "../../operator-cli/src/operator-workflow.test-support.js";
 import {
   type OpticalDriveHardware,
   runArchiveWorker,
@@ -25,6 +27,75 @@ import { DashboardView } from "./operations-dashboard";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("database-backed dashboard over HTTP", () => {
+  it("offers the same Retry, Cancel and request-again workflow after an automatic DVD moves drives", async () => {
+    const fixture = createOperatorWorkflowFixture();
+    const access = createLegacySidecarDataAccess({ databasePath: fixture.databasePath });
+    const fingerprint = `dvdmeta-sha256:${"8".repeat(64)}`;
+    try {
+      const inspectDvd = (suffix: string) => {
+        const drive = access.catalog.upsertOpticalDrive({
+          devicePath: `/dev/synthetic-archive-controls-${suffix}`,
+          isEnabled: true,
+          isPresent: true,
+        });
+        const disc = access.catalog.registerDetectedDisc({
+          opticalDriveId: drive.id,
+          discKind: "dvd",
+          fingerprint,
+          scanData: {
+            schemaVersion: 2,
+            contentId: fingerprint,
+            titles: [{ number: 1, durationSeconds: 600, chapters: 2, audioStreams: [], subtitles: [] }],
+          },
+        });
+        expect(disc.status).toBe("detected");
+        const inspection = completeDiscInspection(access, disc, `synthetic-generation-${suffix}`, 8_192);
+        expect(access.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]?.status).toBe("scanned");
+        return { drive, disc, inspection };
+      };
+      await fixture.run(["archiving-settings", "set", "--key", "synthetic-dashboard-opt-in", "--enabled", "true"]);
+      const initial = inspectDvd("first");
+      access.archiveRequests.admitAutomatically({
+        inspectionId: initial.inspection.id, mediaGeneration: initial.inspection.mediaGeneration,
+      });
+      const [request] = access.archiveRequests.list();
+      const claim = access.archiveJobs.startForInspection(initial.inspection.id, "synthetic-first-worker");
+      expect(claim?.archiveRequestId).toBe(request?.id);
+      access.archiveJobs.fail(claim!, "Synthetic initial copy failure");
+      access.discInspections.clearCurrent({ opticalDriveId: initial.drive.id, reasonCode: "no_medium" });
+      const current = inspectDvd("second");
+
+      async function expectRequest(status: string, button: string, canRequest: boolean) {
+        const dashboard = (await createDashboardResponse(access).json()) as DashboardSnapshot;
+        expect(dashboard.detectedDiscs).toMatchObject({
+          status: "loaded",
+          items: [{ id: current.disc.id, archiveRequest: { id: request!.id, status, attemptCount: 1 } }],
+        });
+        const html = renderToStaticMarkup(<DashboardView state={dashboard} section="discs" />);
+        expect(html).toContain(button);
+        if (!canRequest) expect(html).not.toContain("Request archive");
+        expect(await fixture.run(["inspect", "detected-discs", current.disc.id])).toMatchObject({
+          exitCode: 0,
+          result: { item: {
+            currentArchiveRequest: { id: request!.id, status },
+            availableActions: [{ name: "request-archive", eligible: canRequest }],
+          } },
+        });
+      }
+
+      await expectRequest("needs_attention", "Retry archive", false);
+      expect(await fixture.run(["retry-archive-request", "--key", "synthetic-automatic-retry", "--archive-request-id", request!.id]))
+        .toMatchObject({ exitCode: 0 });
+      await expectRequest("pending", "Cancel request", false);
+      expect(await fixture.run(["cancel-archive-request", "--key", "synthetic-automatic-cancel", "--archive-request-id", request!.id]))
+        .toMatchObject({ exitCode: 0 });
+      await expectRequest("cancelled", "Request archive again", true);
+    } finally {
+      access.close();
+      fixture.dispose();
+    }
+  });
+
   it("projects a running Archive Request onto a matching Detected Disc in another Optical Drive", async () => {
     const access = dataAccessFixture.create();
     const fingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;

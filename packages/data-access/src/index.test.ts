@@ -14129,7 +14129,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
   });
 
   it("rejects ambiguous matching requests before starting an Archive Job", () => {
-    const access = openTestDatabase();
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
     const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
     const scanData = {
       schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
@@ -14161,7 +14162,18 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const second = completeEvidence("/dev/request-source-2", "generation-2");
     const candidate = completeEvidence("/dev/candidate", "generation-3");
     access.archiveRequests.create({ detectedDiscId: first.disc.id });
-    access.archiveRequests.create({ detectedDiscId: second.disc.id });
+    const legacyWriter = new DatabaseSync(databasePath);
+    try {
+      // Older versions could leave both pending when neither request had run.
+      legacyWriter.prepare("UPDATE detected_discs SET status = 'approved' WHERE id = ?")
+        .run(second.disc.id);
+      legacyWriter.prepare(`
+        INSERT INTO archive_requests (id, detected_disc_id, created_at, updated_at)
+        VALUES ('legacy-ambiguous-request', ?, 1, 1)
+      `).run(second.disc.id);
+    } finally {
+      legacyWriter.close();
+    }
 
     expect(() =>
       access.archiveJobs.startForInspection(

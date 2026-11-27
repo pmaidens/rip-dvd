@@ -17,7 +17,7 @@ export function ArchivingSettings() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [loadingAttempt, setLoadingAttempt] = useState(0);
   const [pendingValue, setPendingValue] = useState<boolean | null>(null);
-  const [message, setMessage] = useState("Loading Archiving settings…");
+  const [message, setMessage] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const pendingKey = useRef<string | null>(null);
 
@@ -27,11 +27,9 @@ export function ArchivingSettings() {
       .then(readSavedValue).then((value) => {
         if (controller.signal.aborted) return;
         setEnabled(value);
-        setMessage("");
       }).catch(() => {
         if (controller.signal.aborted) return;
         setProblem("Archiving settings are unavailable.");
-        setMessage("");
       });
     return () => controller.abort();
   }, [loadingAttempt]);
@@ -78,11 +76,11 @@ export function ArchivingSettings() {
       After Disc Inspection, the Archive Worker queues eligible DVDs from enabled drives.
       Turning this off only affects future automatic requests.
     </p>
-    <p role="status">{message}</p>
+    {enabled === null && !problem && <p>Loading Archiving settings…</p>}
+    {message && <p role="status">{message}</p>}
     {problem && <p role="alert">{problem}</p>}
     {problem && enabled === null && <button onClick={() => {
       setProblem(null);
-      setMessage("Loading Archiving settings…");
       setLoadingAttempt((attempt) => attempt + 1);
     }}>Try again</button>}
   </section>;

@@ -1199,7 +1199,8 @@ function DetectedDiscItem({
   }
 
   const canRequestArchive =
-    disc.status === "scanned" ||
+    (disc.status === "scanned" &&
+      (disc.archiveRequest == null || disc.archiveRequest.status === "cancelled")) ||
     (disc.status === "approved" &&
       disc.archiveRequest?.status === "cancelled");
   const isReplacementRequest = disc.archiveRequest?.status === "cancelled";

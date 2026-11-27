@@ -575,9 +575,6 @@ export async function runDiscInspection({
       scanData: scan.scanData,
       sizeBytes: scan.sizeBytes,
     });
-    if (disc.status === "detected") {
-      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    }
     inspection = access.discInspections.record(claim, {
       type: "complete",
       detectedDiscId: disc.id,

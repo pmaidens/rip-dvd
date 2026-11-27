@@ -1470,6 +1470,9 @@ function readDashboardSnapshotRecords(
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];
+  const matchingAutomaticRequests = readSource(() => new Map(
+    displayedDetectedDiscIds.map((id) => [id, access.archiveRequests.findMatchingAutomaticArchiveRequest(id)]),
+  ));
   const archiveRequestSource = readSource(() =>
     activityLimit === undefined
       ? access.archiveRequests.list()
@@ -1909,6 +1912,7 @@ function readDashboardSnapshotRecords(
     detectedDiscSource.status === "error" ||
     drivesById === null ||
     requestByDiscId === null ||
+    matchingAutomaticRequests.status === "error" ||
     requestsById === null ||
     relevantJobByDetectedDiscId === null ||
     jobsByRequestId === null
@@ -1922,7 +1926,7 @@ function readDashboardSnapshotRecords(
                 ? undefined
                 : requestsById.get(relevantDiscJob.archiveRequestId);
               const ownedRequest = requestByDiscId.get(disc.id);
-              const request = linkedRequest === undefined
+              const localRequest = linkedRequest === undefined
                 ? ownedRequest
                 : ownedRequest === undefined
                   ? linkedRequest
@@ -1931,6 +1935,13 @@ function readDashboardSnapshotRecords(
                         linkedRequest.updatedAt > ownedRequest.updatedAt)
                     ? linkedRequest
                     : ownedRequest;
+              const matchingRequest = matchingAutomaticRequests.value.get(disc.id) ?? undefined;
+              const request = localRequest === undefined ||
+                (matchingRequest !== undefined &&
+                  !["fulfilled", "cancelled"].includes(matchingRequest.status) &&
+                  ["fulfilled", "cancelled"].includes(localRequest.status))
+                ? matchingRequest
+                : localRequest;
               const requestJobs = request === undefined
                 ? []
                 : (jobsByRequestId.get(request.id) ?? []);

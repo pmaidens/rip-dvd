@@ -2615,6 +2615,7 @@ export interface DiscInspectionAccess {
 
 export interface ArchiveRequestAccess {
   find(id: ArchiveRequestId): ArchiveRequest | null;
+  findMatchingAutomaticArchiveRequest(id: DetectedDiscId): ArchiveRequest | null;
   listForDetectedDisc(id: DetectedDiscId): ArchiveRequest[];
   listForRearchiveSources(
     ids: readonly OriginalDiscArchiveId[],
@@ -3086,6 +3087,7 @@ export interface ConsistentReadAccess {
   readonly archiveRequests: Pick<
     ArchiveRequestAccess,
     | "find"
+    | "findMatchingAutomaticArchiveRequest"
     | "list"
     | "listForDetectedDisc"
     | "listForRearchiveSources"

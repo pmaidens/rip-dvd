@@ -642,7 +642,8 @@ function encodeActions(job: EncodeJob, requeue: ReturnType<typeof encodeRequeueA
 }
 
 function detectedDiscActions(disc: DetectedDisc, relevantRequest: ArchiveRequest | null) {
-  const eligible = disc.status === "scanned" ||
+  const eligible = (disc.status === "scanned" &&
+    (relevantRequest === null || relevantRequest.status === "cancelled")) ||
     (disc.status === "approved" && relevantRequest?.status === "cancelled");
   const reason = relevantRequest && relevantRequest.status !== "cancelled"
     ? `Archive Request is ${relevantRequest.status}.`

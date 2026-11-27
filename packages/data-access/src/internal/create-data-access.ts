@@ -52,6 +52,7 @@ import {
   notExists,
   or,
   sql,
+  type SQL,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { migrate } from "drizzle-orm/node-sqlite/migrator";
@@ -3077,18 +3078,6 @@ export function createDataAccessInternal(
       )
       .all()
       .map(({ totalBytes }) => totalBytes);
-  }
-
-  function attemptedDeclaredByteCountForArchiveRequest(
-    transaction: Pick<typeof database, "select">,
-    archiveRequestId: ArchiveRequestId,
-  ): number | null {
-    return uniqueDeclaredByteCount(
-      attemptedDeclaredByteCountsForArchiveRequest(
-        transaction,
-        archiveRequestId,
-      ),
-    );
   }
 
   function declaredByteCountForArchiveRequest(
@@ -7412,20 +7401,18 @@ export function createDataAccessInternal(
   }
 
   function matchingArchiveRequestsOnOtherDrives(
-    transaction: MutationTransaction,
+    reader: Pick<typeof database, "select">,
     disc: typeof detectedDiscs.$inferSelect,
     currentBytes: number | null,
     admission: "manual" | "automatic",
   ) {
     // An Archive click can arrive after the DVD moved to the drive that admitted it.
-    const historicalBytes = currentBytes === null && admission === "manual"
-      ? declaredByteCountFromCompletedInspections(transaction, disc.id)
-      : null;
-    if (currentBytes === null && historicalBytes === null) return [];
+    const sourceBytes = currentBytes ?? declaredByteCountFromCompletedInspections(reader, disc.id);
+    if (sourceBytes === null) return [];
     const statuses = admission === "automatic"
       ? automaticAdmissionBlockingStatuses
       : activeArchiveRequestStatuses;
-    return transaction
+    return reader
       .select({
         request: archiveRequests,
         requestedDiscId: requestedDetectedDiscRecords.id,
@@ -7443,21 +7430,50 @@ export function createDataAccessInternal(
         ne(requestedDetectedDiscRecords.id, disc.id),
       ))
       .all()
-      .filter((candidate) => {
-        const candidateIsAutomatic = candidate.request.origin === "automatic";
-        const sourceBytes = currentBytes ?? (candidateIsAutomatic ? historicalBytes : null);
-        if (sourceBytes === null) return false;
-        // A newly admitted automatic request may not have an attempt yet.
-        // Its completed inspection supplies the same identity proof used at claim.
-        const candidateBytes = admission === "automatic" || candidateIsAutomatic
-          ? declaredByteCountForArchiveRequest(
-              transaction, candidate.request.id, candidate.requestedDiscId,
-            )
-          : attemptedDeclaredByteCountForArchiveRequest(transaction, candidate.request.id);
-        return archiveRequestMatchesDvdContinuationIdentity(
-          disc, sourceBytes, candidate, candidateBytes, transaction,
-        );
-      });
+      .filter((candidate) => archiveRequestMatchesDvdContinuationIdentity(
+        disc, sourceBytes, candidate,
+        declaredByteCountForArchiveRequest(reader, candidate.request.id, candidate.requestedDiscId),
+        reader,
+      ));
+  }
+
+  function currentDvdArchiveSource(
+    reader: Pick<typeof database, "select">,
+    match: SQL | undefined,
+  ) {
+    return reader.select({
+      disc: detectedDiscs,
+      totalBytes: discInspections.totalBytes,
+    }).from(discInspections)
+      .innerJoin(opticalDrives, eq(opticalDrives.id, discInspections.opticalDriveId))
+      .innerJoin(detectedDiscs, and(
+        eq(detectedDiscs.id, discInspections.detectedDiscId),
+        eq(detectedDiscs.opticalDriveId, discInspections.opticalDriveId),
+      ))
+      .where(and(
+        match,
+        eq(discInspections.isCurrent, true),
+        eq(discInspections.status, "completed"),
+        eq(opticalDrives.isPresent, true),
+        eq(opticalDrives.isEnabled, true),
+        eq(detectedDiscs.discKind, "dvd"),
+        inArray(detectedDiscs.status, ["scanned", "approved"]),
+      )).get();
+  }
+
+  function findMatchingAutomaticArchiveRequest(detectedDiscId: DetectedDiscId): ArchiveRequest | null {
+    const source = currentDvdArchiveSource(database, eq(discInspections.detectedDiscId, detectedDiscId));
+    if (!source || source.totalBytes === null) return null;
+    const matches = matchingArchiveRequestsOnOtherDrives(
+      database, source.disc, source.totalBytes, "automatic",
+    ).map(({ request }) => request);
+    const active = matches.filter((request) => request.status !== "cancelled");
+    if (active.length > 0) {
+      return active.length === 1 && active[0]?.origin === "automatic" ? active[0] : null;
+    }
+    return matches.filter((request) => request.origin === "automatic").sort((left, right) =>
+      right.updatedAt.getTime() - left.updatedAt.getTime() || right.id.localeCompare(left.id),
+    )[0] ?? null;
   }
 
   function admitAutomaticArchiveRequest({
@@ -7466,25 +7482,10 @@ export function createDataAccessInternal(
     if (!readArchivingSettings().automaticallyArchiveInsertedDvds) return;
     database.transaction((transaction) => {
       if (!readArchivingSettings(transaction).automaticallyArchiveInsertedDvds) return;
-      const source = transaction.select({
-        disc: detectedDiscs,
-        totalBytes: discInspections.totalBytes,
-      }).from(discInspections)
-        .innerJoin(opticalDrives, eq(opticalDrives.id, discInspections.opticalDriveId))
-        .innerJoin(detectedDiscs, and(
-          eq(detectedDiscs.id, discInspections.detectedDiscId),
-          eq(detectedDiscs.opticalDriveId, discInspections.opticalDriveId),
-        ))
-        .where(and(
-          eq(discInspections.id, inspectionId),
-          eq(discInspections.mediaGeneration, mediaGeneration),
-          eq(discInspections.isCurrent, true),
-          eq(discInspections.status, "completed"),
-          eq(opticalDrives.isPresent, true),
-          eq(opticalDrives.isEnabled, true),
-          eq(detectedDiscs.discKind, "dvd"),
-          inArray(detectedDiscs.status, ["scanned", "approved"]),
-        )).get();
+      const source = currentDvdArchiveSource(transaction, and(
+        eq(discInspections.id, inspectionId),
+        eq(discInspections.mediaGeneration, mediaGeneration),
+      ));
       if (source === undefined || source.totalBytes === null) return;
       const { disc, totalBytes } = source;
       if (
@@ -7619,10 +7620,6 @@ export function createDataAccessInternal(
         assertDvdRecoveryEvidenceAdmissionAvailable(
           reusableRequest?.evidenceFormat,
         );
-        // Reusing an automatic request leaves the clicked disc eligible for later manual submission.
-        if (reusableRequest !== undefined && reusableRequest.origin !== "automatic") {
-          approveScannedDisc(transaction, disc, timestamp);
-        }
         if (
           reusableRequest?.status === "needs_attention" &&
           reusableRequest.origin !== "automatic"
@@ -15433,6 +15430,8 @@ export function createDataAccessInternal(
         },
         archiveRequests: {
           find: (id) => access.archiveRequests.find(id),
+          findMatchingAutomaticArchiveRequest: (id) =>
+            access.archiveRequests.findMatchingAutomaticArchiveRequest(id),
           list: (statuses, options) =>
             access.archiveRequests.list(statuses, options),
           listForDetectedDisc: (id) =>
@@ -21872,6 +21871,12 @@ export function createDataAccessInternal(
                 "Completed Disc Inspection must link to its Optical Drive observation",
               );
             }
+            if (disc.discKind === "dvd" && disc.status === "detected") {
+              // Commit the identity evidence and the operator's eligibility together.
+              transaction.update(detectedDiscs)
+                .set({ status: "scanned", updatedAt: timestamp })
+                .where(eq(detectedDiscs.id, disc.id)).run();
+            }
             recordAttempt("completed", null);
             inspectionProgress.delete(current.id);
             return requireRow(
@@ -22264,6 +22269,7 @@ export function createDataAccessInternal(
       },
       create: createArchiveRequest,
       admitAutomatically: admitAutomaticArchiveRequest,
+      findMatchingAutomaticArchiveRequest,
       submit: ({ mutationKey, detectedDiscId, evidenceFormat }) =>
         createArchiveRequest({
           detectedDiscId,
@@ -22511,7 +22517,8 @@ export function createDataAccessInternal(
               )
               .limit(1)
               .get()?.request;
-            const relevantRequest = [ownedRequest, attemptedRequest].filter(
+            const matchingRequest = findMatchingAutomaticArchiveRequest(detectedDiscId) ?? undefined;
+            const relevantRequest = [ownedRequest, attemptedRequest, matchingRequest].filter(
               (request): request is NonNullable<typeof request> =>
                 request !== undefined,
             ).sort((left, right) => {

@@ -1302,6 +1302,34 @@ describe("automatic Archive Request admission", () => {
     }
   });
 
+  it("reuses unattempted manual work when automatic admission and an Archive click reach the new drive", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, first, second, copyRunner, originalsLibraryPath } = fixture;
+    const fingerprint = `dvdmeta-sha256:${"f".repeat(64)}`;
+    try {
+      fixture.insert(first, fingerprint);
+      await fixture.poll();
+      const [disc] = access.catalog.listDetectedDiscs();
+      const manual = access.archiveRequests.create({ detectedDiscId: disc!.id, priority: 7 });
+      fixture.set(true);
+      fixture.eject(first);
+      fixture.insert(second, fingerprint);
+      await fixture.poll({ access: fixture.open() });
+      const alternate = access.catalog.listDetectedDiscs().find(({ id }) => id !== disc!.id)!;
+      expect(access.archiveRequests.submit({
+        detectedDiscId: alternate.id, mutationKey: "synthetic-click-existing-manual-work",
+      })).toEqual(manual);
+      expect(access.archiveRequests.list()).toEqual([manual]);
+
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(access.archiveJobs.list()).toEqual([
+        expect.objectContaining({ archiveRequestId: manual.id, status: "completed", attemptOrdinal: 1 }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("keeps the alternate disc eligible for an explicit request after cancelling reused automatic work", async () => {
     const fixture = automaticArchivingFixture();
     const { access, first, second } = fixture;
