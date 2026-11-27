@@ -56,6 +56,56 @@ test("changes automatic archiving in Settings and keeps the saved value after re
   await expect(automatic).not.toBeChecked();
 });
 
+test("shows the current archiving setting after retrying a saved change whose response was lost", async ({ page }) => {
+  const other = await page.context().newPage();
+  const endpoint = "/api/archiving-settings";
+  await other.goto(endpoint);
+  const writeFromOtherPage = (body: string) => other.evaluate(async ({ endpoint, body }) => {
+    const response = await fetch(endpoint, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+    });
+    return response.status;
+  }, { endpoint, body });
+  const setElsewhere = (enabled: boolean) => writeFromOtherPage(JSON.stringify({
+    mutationKey: `synthetic-browser-archiving-${crypto.randomUUID()}`,
+    automaticallyArchiveInsertedDvds: enabled,
+  }));
+  const postedBodies: string[] = [];
+  await page.route(`**${endpoint}`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    const body = route.request().postData()!;
+    postedBodies.push(body);
+    if (postedBodies.length === 1) {
+      expect(await writeFromOtherPage(body)).toBe(200);
+      await route.abort();
+    } else {
+      await route.continue();
+    }
+  });
+
+  try {
+    expect(await setElsewhere(true)).toBe(200);
+    await page.goto("/settings#archiving");
+    const section = page.getByRole("region", { name: "Archiving", exact: true });
+    const automatic = section.getByRole("checkbox", { name: "Automatically archive inserted DVDs" });
+    await expect(automatic).toBeChecked();
+    await automatic.click();
+    await expect(section.getByRole("alert")).toContainText("could not be confirmed");
+    expect(await setElsewhere(true)).toBe(200);
+    await automatic.click();
+    await expect(section.getByRole("status")).toHaveText("Automatic archiving enabled.");
+    await expect(automatic).toBeChecked();
+    expect(postedBodies).toHaveLength(2);
+    expect(postedBodies[1]).toBe(postedBodies[0]);
+  } finally {
+    await setElsewhere(false);
+    await other.close();
+  }
+});
+
 for (const section of [
   { name: "Notifications", hash: "notifications", control: "Check notification status" },
   { name: "Encoding Profiles", hash: "encoding-profiles", control: "Profile key" },

@@ -43,16 +43,19 @@ export function ArchivingSettings() {
     setProblem(null);
     setMessage("Saving Archiving settings…");
     try {
-      const saved = await readSavedValue(await fetch("/api/archiving-settings", {
+      const response = await fetch("/api/archiving-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mutationKey, automaticallyArchiveInsertedDvds: value }),
-      }));
+      });
+      if (!response.ok) throw new Error("Archiving settings request failed.");
+      // A replay returns the original mutation result, which another operator may have changed.
+      const saved = await readSavedValue(await fetch("/api/archiving-settings"));
       pendingKey.current = null;
       setEnabled(saved);
       setMessage(saved ? "Automatic archiving enabled." : "Automatic archiving disabled.");
     } catch {
-      setProblem("Archiving settings could not be saved. Try changing the setting again.");
+      setProblem("The saved Archiving setting could not be confirmed. Try changing it again.");
       setMessage("");
     } finally {
       setPendingValue(null);

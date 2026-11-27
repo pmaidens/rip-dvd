@@ -1266,6 +1266,42 @@ describe("automatic Archive Request admission", () => {
     },
   );
 
+  it("reuses automatic work when a delayed Archive click comes from the drive the DVD left", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, first, second, copyRunner, originalsLibraryPath } = fixture;
+    const fingerprint = `dvdmeta-sha256:${"d".repeat(64)}`;
+    try {
+      fixture.insert(first, fingerprint);
+      await fixture.poll();
+      const [oldDisc] = access.catalog.listDetectedDiscs();
+      expect(oldDisc).toBeDefined();
+      fixture.set(true);
+      fixture.eject(first);
+      fixture.insert(second, fingerprint);
+      await fixture.poll({ access: fixture.open() });
+
+      const [automatic] = access.archiveRequests.list();
+      expect(automatic).toMatchObject({ origin: "automatic", status: "pending" });
+      expect(automatic?.detectedDiscId).not.toBe(oldDisc!.id);
+      expect(access.discInspections.list({ currentOnly: true }).map(({ detectedDiscId }) => detectedDiscId))
+        .toEqual([automatic!.detectedDiscId]);
+      const fromOldCard = access.archiveRequests.submit({
+        detectedDiscId: oldDisc!.id, mutationKey: "synthetic-delayed-archive-click",
+      });
+      expect(fromOldCard.id).toBe(automatic!.id);
+
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(access.archiveRequests.list()).toEqual([
+        expect.objectContaining({ id: automatic!.id, origin: "automatic", status: "fulfilled" }),
+      ]);
+      expect(access.archiveJobs.list()).toEqual([
+        expect.objectContaining({ archiveRequestId: automatic!.id, status: "completed" }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it.each(["cancelled", "needs_attention"] as const)(
     "keeps a %s request stopped after worker restart and reinsertion in another drive",
     async (stoppedStatus) => {

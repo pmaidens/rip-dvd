@@ -3036,18 +3036,19 @@ export function createDataAccessInternal(
     return observed.size === 1 ? [...observed][0]! : null;
   }
 
-  function currentDeclaredByteCountForDetectedDisc(
-    transaction: CatalogTransaction,
+  function declaredByteCountFromCompletedInspections(
+    reader: Pick<typeof database, "select">,
     detectedDiscId: DetectedDiscId,
+    currentOnly = false,
   ): number | null {
     return uniqueDeclaredByteCount(
-      transaction
+      reader
         .select({ totalBytes: discInspections.totalBytes })
         .from(discInspections)
         .where(
           and(
             eq(discInspections.detectedDiscId, detectedDiscId),
-            eq(discInspections.isCurrent, true),
+            currentOnly ? eq(discInspections.isCurrent, true) : undefined,
             eq(discInspections.status, "completed"),
             isNotNull(discInspections.totalBytes),
           ),
@@ -3123,19 +3124,8 @@ export function createDataAccessInternal(
       return sourceArchive?.boundaryReportedSizeBytes ??
         sourceArchive?.sizeBytes ?? null;
     }
-    return uniqueDeclaredByteCount(
-      transaction
-        .select({ totalBytes: discInspections.totalBytes })
-        .from(discInspections)
-        .where(
-          and(
-            eq(discInspections.detectedDiscId, requestedDetectedDiscId),
-            eq(discInspections.status, "completed"),
-            isNotNull(discInspections.totalBytes),
-          ),
-        )
-        .all()
-        .map(({ totalBytes }) => totalBytes),
+    return declaredByteCountFromCompletedInspections(
+      transaction, requestedDetectedDiscId,
     );
   }
 
@@ -7382,6 +7372,9 @@ export function createDataAccessInternal(
   const activeArchiveRequestStatuses = [
     "pending", "running", "needs_attention", "cancellation_requested",
   ] as const;
+  const automaticAdmissionBlockingStatuses = [
+    ...activeArchiveRequestStatuses, "cancelled",
+  ] as const;
 
   function approveScannedDisc(
     transaction: MutationTransaction,
@@ -7421,11 +7414,16 @@ export function createDataAccessInternal(
   function matchingArchiveRequestsOnOtherDrives(
     transaction: MutationTransaction,
     disc: typeof detectedDiscs.$inferSelect,
-    declaredByteCount: number,
+    currentBytes: number | null,
     admission: "manual" | "automatic",
   ) {
+    // An Archive click can arrive after the DVD moved to the drive that admitted it.
+    const historicalBytes = currentBytes === null && admission === "manual"
+      ? declaredByteCountFromCompletedInspections(transaction, disc.id)
+      : null;
+    if (currentBytes === null && historicalBytes === null) return [];
     const statuses = admission === "automatic"
-      ? [...activeArchiveRequestStatuses, "cancelled"] as const
+      ? automaticAdmissionBlockingStatuses
       : activeArchiveRequestStatuses;
     return transaction
       .select({
@@ -7446,15 +7444,18 @@ export function createDataAccessInternal(
       ))
       .all()
       .filter((candidate) => {
+        const candidateIsAutomatic = candidate.request.origin === "automatic";
+        const sourceBytes = currentBytes ?? (candidateIsAutomatic ? historicalBytes : null);
+        if (sourceBytes === null) return false;
         // A newly admitted automatic request may not have an attempt yet.
         // Its completed inspection supplies the same identity proof used at claim.
-        const candidateBytes = admission === "automatic" || candidate.request.origin === "automatic"
+        const candidateBytes = admission === "automatic" || candidateIsAutomatic
           ? declaredByteCountForArchiveRequest(
               transaction, candidate.request.id, candidate.requestedDiscId,
             )
           : attemptedDeclaredByteCountForArchiveRequest(transaction, candidate.request.id);
         return archiveRequestMatchesDvdContinuationIdentity(
-          disc, declaredByteCount, candidate, candidateBytes, transaction,
+          disc, sourceBytes, candidate, candidateBytes, transaction,
         );
       });
   }
@@ -7488,18 +7489,20 @@ export function createDataAccessInternal(
       const { disc, totalBytes } = source;
       if (
         !isCurrentDvdContentSize(totalBytes) ||
-        decodeDvdTitleMap(disc.scanData)?.contentId !== disc.fingerprint ||
-        findOriginalArchiveByFingerprintOrContentIdAlias(disc.fingerprint, transaction) ||
-        dvdArchiveIdentityReconciliationRequired(disc.discKind, disc.fingerprint, transaction)
+        decodeDvdTitleMap(disc.scanData)?.contentId !== disc.fingerprint
       ) return;
       const existing = transaction.select({ id: archiveRequests.id }).from(archiveRequests)
         .where(and(
           eq(archiveRequests.detectedDiscId, disc.id),
-          inArray(archiveRequests.status, [...activeArchiveRequestStatuses, "cancelled"]),
+          inArray(archiveRequests.status, automaticAdmissionBlockingStatuses),
         )).get();
       if (existing || matchingArchiveRequestsOnOtherDrives(
         transaction, disc, totalBytes, "automatic",
       ).length > 0) return;
+      if (
+        findOriginalArchiveByFingerprintOrContentIdAlias(disc.fingerprint, transaction) ||
+        dvdArchiveIdentityReconciliationRequired(disc.discKind, disc.fingerprint, transaction)
+      ) return;
       const timestamp = now();
       approveScannedDisc(transaction, disc, timestamp);
       insertPendingArchiveRequest(transaction, disc.id, {
@@ -7601,12 +7604,11 @@ export function createDataAccessInternal(
           ),
         );
       }
-      const declaredByteCount = disc.discKind === "dvd"
-        ? currentDeclaredByteCountForDetectedDisc(transaction, disc.id)
-        : null;
-      if (disc.discKind === "dvd" && declaredByteCount !== null) {
+      if (disc.discKind === "dvd") {
         const reusableRequests = matchingArchiveRequestsOnOtherDrives(
-          transaction, disc, declaredByteCount, "manual",
+          transaction, disc,
+          declaredByteCountFromCompletedInspections(transaction, disc.id, true),
+          "manual",
         );
         if (reusableRequests.length > 1) {
           throw new DomainInvariantError(
