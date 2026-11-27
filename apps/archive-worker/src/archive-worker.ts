@@ -294,11 +294,15 @@ async function pollArchiveWorkerWithDriveAdmission(
         signal,
         waitForNextSettlingObservation,
       });
-      if (
-        completed === null ||
-        copyRunner === undefined ||
-        originalsLibraryPath === undefined
-      ) {
+      signal.throwIfAborted();
+      if (completed === null) {
+        return;
+      }
+      access.archiveRequests.admitAutomatically({
+        inspectionId: completed.inspection.id,
+        mediaGeneration: completed.mediaGeneration,
+      });
+      if (copyRunner === undefined || originalsLibraryPath === undefined) {
         return;
       }
       const detectedDiscId = completed.inspection.detectedDiscId;

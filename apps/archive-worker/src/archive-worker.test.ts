@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -1017,6 +1018,401 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
   }
+});
+
+function automaticArchivingFixture() {
+  const directory = mkdtempSync(join(tmpdir(), "rip-dvd-automatic-archiving-"));
+  temporaryDirectories.push(directory);
+  const databasePath = join(directory, "test.sqlite");
+  const originalsLibraryPath = join(directory, "originals");
+  mkdirSync(originalsLibraryPath);
+  const connections = new Set<ReturnType<typeof createLegacySidecarDataAccess>>();
+  const open = () => {
+    const access = createLegacySidecarDataAccess({ databasePath });
+    connections.add(access);
+    return access;
+  };
+  const access = open();
+  const drives = ["/dev/synthetic-dvd-a", "/dev/synthetic-dvd-b"].map((devicePath, index) => ({
+    devicePath,
+    serialNumber: `SYNTHETIC-AUTOMATIC-${index}`,
+  }));
+  for (const drive of drives) {
+    access.catalog.upsertOpticalDrive({ ...drive, isPresent: true, isEnabled: true });
+  }
+  const first = drives[0]!.devicePath;
+  const second = drives[1]!.devicePath;
+  const sizeBytes = 4 * 2_048;
+  const inserted = new Map<string, { fingerprint: string; mediaGeneration: string }>();
+  let generation = 0;
+  const hardware = {
+    ...stableDeviceBinding(),
+    discover: vi.fn(async () => drives),
+    observeMedia: vi.fn<OpticalDriveHardware["observeMedia"]>(async ({ drive }) => {
+      const disc = inserted.get(drive.devicePath);
+      return disc === undefined ? null : { mediaGeneration: disc.mediaGeneration, capacityBytes: sizeBytes };
+    }),
+    observeMediaGeneration: vi.fn<OpticalDriveHardware["observeMediaGeneration"]>(
+      async ({ drive }) => inserted.get(drive.devicePath)?.mediaGeneration ?? "empty",
+    ),
+    scanDvd: vi.fn<OpticalDriveHardware["scanDvd"]>(async ({ drive }) => {
+      const disc = inserted.get(drive.devicePath);
+      if (disc === undefined) return null;
+      return {
+        fingerprint: disc.fingerprint,
+        sizeBytes,
+        scanData: {
+          schemaVersion: 2,
+          contentId: disc.fingerprint,
+          titles: [{ number: 1, durationSeconds: 600, chapters: 2, audioStreams: [], subtitles: [] }],
+        },
+      };
+    }),
+  };
+  const copyRunner = {
+    copy: vi.fn<DvdCopyRunner["copy"]>(async ({ authorizeStart, outputPath }) => {
+      await authorizeStart?.();
+      writeFileSync(outputPath, Buffer.alloc(sizeBytes, 5));
+      return createCleanDvdRecoveryResult(sizeBytes);
+    }),
+    isActive: () => false,
+    withDeviceInactive: async (_path, mutation) => mutation(),
+    waitForInactive: async () => undefined,
+  } satisfies DvdCopyRunner;
+  return {
+    access, open, databasePath, hardware, copyRunner, first, second, originalsLibraryPath,
+    restart() {
+      connections.delete(access);
+      access.close();
+      return open();
+    },
+    close() {
+      connections.forEach((connection) => connection.close());
+    },
+    insert(path: string, fingerprint: string) {
+      inserted.set(path, { fingerprint, mediaGeneration: `synthetic-insertion-${++generation}` });
+    },
+    eject: (path: string) => inserted.delete(path),
+    set(enabled: boolean) {
+      access.archivingSettings.set({
+        mutationKey: `synthetic-automatic-${enabled}`,
+        automaticallyArchiveInsertedDvds: enabled,
+      });
+    },
+    poll(overrides: Partial<PollArchiveWorkerOptions> = {}) {
+      return pollArchiveWorker({
+        access, hardware, configuredDevicePath: first, log: () => {},
+        signal: new AbortController().signal, ...overrides,
+      });
+    },
+  };
+}
+
+describe("automatic Archive Request admission", () => {
+  it("picks up a DVD already inspected before opt-in and archives it through the ordinary scheduler", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, copyRunner, hardware, first, originalsLibraryPath } = fixture;
+    try {
+      fixture.insert(first, `dvdmeta-sha256:${"1".repeat(64)}`);
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(access.discInspections.list({ currentOnly: true })[0]?.status).toBe("completed");
+      expect(access.archiveRequests.list()).toEqual([]);
+      expect(access.archiveJobs.list()).toEqual([]);
+
+      fixture.set(true);
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(hardware.scanDvd).toHaveBeenCalledOnce();
+      expect(access.archiveRequests.list()).toEqual([
+        expect.objectContaining({ origin: "automatic", status: "fulfilled", priority: 0 }),
+      ]);
+      const [request] = access.archiveRequests.list();
+      expect(access.archiveJobs.list()).toEqual([
+        expect.objectContaining({ archiveRequestId: request!.id, status: "completed", attemptOrdinal: 1 }),
+      ]);
+      expect(access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("keeps previously admitted work in the queue after ejection and opt-out", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, copyRunner, first, second, originalsLibraryPath } = fixture;
+    const fingerprint = `dvdmeta-sha256:${"2".repeat(64)}`;
+    try {
+      fixture.set(true);
+      fixture.insert(first, fingerprint);
+      await fixture.poll();
+      const [request] = access.archiveRequests.list();
+      expect(request).toMatchObject({ status: "pending", origin: "automatic" });
+      expect(access.archiveJobs.list()).toEqual([]);
+
+      fixture.eject(first);
+      fixture.set(false);
+      fixture.insert(second, `dvdmeta-sha256:${"3".repeat(64)}`);
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(access.archiveRequests.list()).toEqual([request]);
+      expect(access.archiveRequests.waitingStatus(request!.id)?.code).toBe("matching_disc_required");
+
+      fixture.insert(second, fingerprint);
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      expect(access.archiveRequests.list()).toEqual([
+        expect.objectContaining({ id: request!.id, origin: "automatic", status: "fulfilled" }),
+      ]);
+      expect(access.archiveJobs.list()).toEqual([
+        expect.objectContaining({ archiveRequestId: request!.id, status: "completed" }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("keeps automatic work pending while the ordinary scheduler uses its slot for higher-priority work", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, copyRunner, first, second, originalsLibraryPath } = fixture;
+    const copyStarted = Promise.withResolvers<void>();
+    const finishCopy = Promise.withResolvers<void>();
+    let pendingPoll: Promise<void> | undefined;
+    try {
+      fixture.insert(first, `dvdmeta-sha256:${"b".repeat(64)}`);
+      fixture.insert(second, `dvdmeta-sha256:${"c".repeat(64)}`);
+      await fixture.poll();
+      const secondDrive = access.catalog.listOpticalDrives().find(({ devicePath }) => devicePath === second)!;
+      const secondDisc = access.catalog.listDetectedDiscs().find(({ opticalDriveId }) => opticalDriveId === secondDrive.id)!;
+      const manual = access.archiveRequests.create({ detectedDiscId: secondDisc.id, priority: 9 });
+      fixture.set(true);
+      await fixture.poll();
+      const automatic = access.archiveRequests.list().find(({ id }) => id !== manual.id)!;
+      expect(automatic).toMatchObject({ origin: "automatic", status: "pending", priority: 0 });
+      expect(access.archiveRequests.find(manual.id)).toEqual(manual);
+
+      const copy = copyRunner.copy.getMockImplementation()!;
+      copyRunner.copy.mockImplementationOnce(async (options) => {
+        copyStarted.resolve();
+        await finishCopy.promise;
+        return copy(options);
+      });
+      pendingPoll = fixture.poll({ concurrency: 1, copyRunner, originalsLibraryPath });
+      await copyStarted.promise;
+      expect(access.archiveJobs.list()).toEqual([
+        expect.objectContaining({ archiveRequestId: manual.id, status: "running" }),
+      ]);
+      expect(access.archiveRequests.find(automatic.id)).toEqual(automatic);
+      finishCopy.resolve();
+      await pendingPoll;
+      expect(access.archiveRequests.list(["fulfilled"])).toHaveLength(2);
+      expect(access.archiveJobs.list(["completed"])).toHaveLength(2);
+    } finally {
+      finishCopy.resolve();
+      await pendingPoll;
+      fixture.close();
+    }
+  });
+
+  it.each(["manual", "automatic"] as const)(
+    "keeps one request when the %s admission commits first across drives and worker connections",
+    async (firstAdmission) => {
+      const fixture = automaticArchivingFixture();
+      const { access, hardware, first, second } = fixture;
+      const fingerprint = `dvdmeta-sha256:${"4".repeat(64)}`;
+      const paused = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let pendingPoll: Promise<void> | undefined;
+      try {
+        fixture.insert(first, fingerprint);
+        fixture.insert(second, fingerprint);
+        await fixture.poll();
+        const firstDrive = access.catalog.listOpticalDrives().find(({ devicePath }) => devicePath === first);
+        const firstDisc = access.catalog.listDetectedDiscs().find(({ opticalDriveId }) => opticalDriveId === firstDrive?.id);
+        const secondDisc = access.catalog.listDetectedDiscs().find(({ id }) => id !== firstDisc?.id);
+        expect(secondDisc).toBeDefined();
+        fixture.set(true);
+
+        const observe = hardware.observeMedia.getMockImplementation()!;
+        hardware.observeMedia.mockImplementationOnce(async (...args) => {
+          paused.resolve();
+          await resume.promise;
+          return observe(...args);
+        });
+        pendingPoll = fixture.poll({ access: fixture.open(), workerId: "synthetic-paused-worker" });
+        await paused.promise;
+
+        const clickArchive = () => access.archiveRequests.submit({
+          detectedDiscId: secondDisc!.id, mutationKey: "synthetic-click-archive",
+        });
+        if (firstAdmission === "automatic") {
+          await fixture.poll({ access: fixture.open(), workerId: "synthetic-competing-worker" });
+          expect(access.archiveRequests.list()[0]?.detectedDiscId).toBe(firstDisc!.id);
+        }
+        const accepted = clickArchive();
+        resume.resolve();
+        await pendingPoll;
+        await fixture.poll();
+        expect(access.archiveRequests.list()).toEqual([
+          expect.objectContaining({ id: accepted.id, origin: firstAdmission, status: "pending", priority: 0 }),
+        ]);
+        expect(access.archiveJobs.list()).toEqual([]);
+      } finally {
+        resume.resolve();
+        await pendingPoll;
+        fixture.close();
+      }
+    },
+  );
+
+  it.each(["cancelled", "needs_attention"] as const)(
+    "keeps a %s request stopped after worker restart and reinsertion in another drive",
+    async (stoppedStatus) => {
+      const fixture = automaticArchivingFixture();
+      const { access, copyRunner, first, second, originalsLibraryPath } = fixture;
+      const fingerprint = `dvdmeta-sha256:${"5".repeat(64)}`;
+      try {
+        fixture.set(true);
+        fixture.insert(first, fingerprint);
+        if (stoppedStatus === "needs_attention") {
+          copyRunner.copy.mockRejectedValueOnce(new Error("Synthetic copy failure"));
+          await fixture.poll({ copyRunner, originalsLibraryPath });
+        } else {
+          await fixture.poll();
+          access.archiveRequests.cancel(access.archiveRequests.list()[0]!.id);
+        }
+        const [stopped] = access.archiveRequests.list();
+        expect(stopped?.status).toBe(stoppedStatus);
+        const history = access.archiveJobs.list();
+
+        const restarted = fixture.restart();
+        fixture.insert(first, `dvdmeta-sha256:${"6".repeat(64)}`);
+        fixture.insert(second, fingerprint);
+        await fixture.poll({ access: restarted, copyRunner, originalsLibraryPath });
+        await fixture.poll({ access: restarted, copyRunner, originalsLibraryPath });
+        expect(restarted.archiveRequests.find(stopped!.id)).toEqual(stopped);
+        expect(restarted.archiveJobs.list(undefined, { archiveRequestIds: [stopped!.id] })).toEqual(history);
+        expect(restarted.archiveRequests.list(["fulfilled"])).toHaveLength(1);
+        expect(restarted.archiveRequests.list()).toHaveLength(2);
+
+        const alternateDrive = restarted.catalog.listOpticalDrives().find(({ devicePath }) => devicePath === second);
+        const alternateDisc = restarted.catalog.listDetectedDiscs().find(({ opticalDriveId }) => opticalDriveId === alternateDrive?.id);
+        const requested = stoppedStatus === "cancelled"
+          ? restarted.archiveRequests.submit({
+              detectedDiscId: alternateDisc!.id, mutationKey: "synthetic-request-archive-again",
+            })
+          : restarted.archiveRequests.retry(stopped!.id);
+        await fixture.poll({ access: restarted, copyRunner, originalsLibraryPath });
+        expect(restarted.archiveRequests.find(requested.id)).toMatchObject({
+          origin: stoppedStatus === "cancelled" ? "manual" : "automatic",
+          status: "fulfilled",
+        });
+        expect(restarted.archiveJobs.list(undefined, { archiveRequestIds: [requested.id] }).map((job) => job.attemptOrdinal))
+          .toEqual(stoppedStatus === "cancelled" ? [1] : [2, 1]);
+      } finally {
+        fixture.close();
+      }
+    },
+  );
+
+  it("skips saved archives by primary fingerprint and by content ID alias", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, copyRunner, databasePath, first, second, originalsLibraryPath } = fixture;
+    const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
+    const alias = `sha256:${"8".repeat(64)}`;
+    try {
+      fixture.set(true);
+      fixture.insert(first, fingerprint);
+      await fixture.poll({ copyRunner, originalsLibraryPath });
+      const [archived] = access.catalog.listOriginalDiscArchives();
+      expect(archived).toBeDefined();
+      const sqlite = new DatabaseSync(databasePath);
+      try {
+        sqlite.prepare("INSERT INTO original_disc_archive_content_ids (original_disc_archive_id, content_id) VALUES (?, ?)")
+          .run(archived!.id, alias);
+      } finally {
+        sqlite.close();
+      }
+
+      for (const savedFingerprint of [fingerprint, alias]) {
+        fixture.eject(first);
+        fixture.insert(second, savedFingerprint);
+        await fixture.poll({ copyRunner, originalsLibraryPath });
+        expect(access.discInspections.list({ currentOnly: true })[0]?.status).toBe("completed");
+        expect(access.archiveRequests.list()).toHaveLength(1);
+        expect(access.archiveJobs.list()).toHaveLength(1);
+      }
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("waits for successful current inspection and skips disabled and empty drives", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, hardware, first, second } = fixture;
+    const fingerprint = `dvdmeta-sha256:${"9".repeat(64)}`;
+    try {
+      fixture.set(true);
+      const disabled = access.catalog.listOpticalDrives().find(({ devicePath }) => devicePath === second)!;
+      access.catalog.upsertOpticalDrive({
+        devicePath: disabled.devicePath, serialNumber: disabled.serialNumber!,
+        isPresent: true, isEnabled: false,
+      });
+      fixture.insert(second, fingerprint);
+      await fixture.poll();
+      expect(access.discInspections.list({ currentOnly: true })).toEqual([]);
+      expect(access.archiveRequests.list()).toEqual([]);
+
+      fixture.insert(first, fingerprint);
+      hardware.scanDvd.mockRejectedValueOnce(
+        new DiscInspectionError("fail", "invalid_metadata", "Synthetic unsupported DVD"),
+      );
+      await fixture.poll();
+      expect(access.discInspections.list({ currentOnly: true })[0]?.status).toBe("failed");
+      expect(access.archiveRequests.list()).toEqual([]);
+
+      fixture.insert(first, fingerprint);
+      const scan = hardware.scanDvd.getMockImplementation()!;
+      hardware.scanDvd.mockImplementationOnce(async (...args) => {
+        expect(access.discInspections.list({ currentOnly: true })[0]?.status).toBe("running");
+        expect(access.archiveRequests.list()).toEqual([]);
+        const stale = await scan(...args);
+        fixture.eject(first);
+        return stale;
+      });
+      await fixture.poll();
+      expect(access.discInspections.list().map(({ status }) => status)).toContain("aborted");
+      expect(access.archiveRequests.list()).toEqual([]);
+
+      fixture.insert(first, fingerprint);
+      await fixture.poll();
+      expect(access.archiveRequests.list()).toEqual([
+        expect.objectContaining({ origin: "automatic", status: "pending" }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("honors a disable committed while the worker is observing an eligible DVD", async () => {
+    const fixture = automaticArchivingFixture();
+    const { access, hardware, first } = fixture;
+    const operator = fixture.open();
+    try {
+      fixture.insert(first, `dvdmeta-sha256:${"a".repeat(64)}`);
+      await fixture.poll();
+      fixture.set(true);
+      const observe = hardware.observeMedia.getMockImplementation()!;
+      hardware.observeMedia.mockImplementationOnce(async (...args) => {
+        const observation = await observe(...args);
+        operator.archivingSettings.set({
+          mutationKey: "synthetic-disable-during-observation",
+          automaticallyArchiveInsertedDvds: false,
+        });
+        return observation;
+      });
+      await fixture.poll();
+      expect(access.discInspections.list({ currentOnly: true })[0]?.status).toBe("completed");
+      expect(access.archiveRequests.list()).toEqual([]);
+    } finally {
+      fixture.close();
+    }
+  });
 });
 
 describe("archive worker polling", () => {

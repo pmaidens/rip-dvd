@@ -395,6 +395,7 @@ export interface ArchiveRequest {
   detectedDiscId: DetectedDiscId;
   rearchiveSourceArchiveId: OriginalDiscArchiveId | null;
   evidenceFormat: DvdArchiveEvidenceFormat | null;
+  origin: "manual" | "automatic" | null;
   status: ArchiveRequestStatus;
   priority: number;
   cancellationRequestedAt: Date | null;
@@ -2623,6 +2624,10 @@ export interface ArchiveRequestAccess {
     evidenceFormat?: DvdArchiveEvidenceFormat;
     priority?: number;
   }): ArchiveRequest;
+  admitAutomatically(input: {
+    inspectionId: DiscInspectionId;
+    mediaGeneration: string;
+  }): void;
   submit(input: {
     mutationKey: string;
     detectedDiscId: DetectedDiscId;
@@ -2653,6 +2658,10 @@ export interface ArchiveRequestAccess {
     detectedDiscId: DetectedDiscId,
   ): boolean;
   waitingStatus(id: ArchiveRequestId): ArchiveRequestWaitingStatus | null;
+}
+
+export interface ArchivingSettings {
+  automaticallyArchiveInsertedDvds: boolean;
 }
 
 export interface ArchiveRequestWaitingStatus {
@@ -3228,6 +3237,10 @@ export interface DataAccess {
   readonly encodingProfiles: EncodingProfileAccess;
   readonly discInspections: DiscInspectionAccess;
   readonly archiveRequests: ArchiveRequestAccess;
+  readonly archivingSettings: {
+    read(): ArchivingSettings;
+    set(input: ArchivingSettings & { mutationKey: string }): ArchivingSettings;
+  };
   readonly archiveJobs: ArchiveJobAccess;
   readonly archiveRecoveryWork: ArchiveRecoveryWorkAccess;
   readonly encodeJobs: EncodeJobAccess;

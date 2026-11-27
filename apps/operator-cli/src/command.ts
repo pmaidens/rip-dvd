@@ -24,6 +24,7 @@ import {
   InvalidEncodeOutputArtifactIdentityError,
   InvalidEncodeOutputExportInputError,
   generateMutationKey,
+  InvalidArchivingSettingsInputError,
   InvalidMutationKeyError,
   InvalidProfileInputError,
   parseMutationKey,
@@ -169,6 +170,13 @@ const commandDefinitions = [
       input: { mode: ["exact", "current_revision"], recreationToken: "required", preflightToken: "required", selection: "required for current_revision; omitted for exact" },
       result: "A new linked request; admission is not generation completion. Exact inputs do not promise byte-identical output or watchability.",
     },
+  },
+  {
+    name: "archiving-settings",
+    description: "Read or explicitly set whether the Archive Worker automatically requests inserted DVDs.",
+    usage: "rip-dvd archiving-settings get | rip-dvd archiving-settings set --key <key> --enabled <true|false>",
+    inputs: { arguments: ["get|set"], options: ["--key", "--enabled"] },
+    example: "rip-dvd archiving-settings set --key synthetic-archiving-on --enabled true",
   },
   {
     name: "notifications",
@@ -1682,6 +1690,38 @@ function withAccess<T>(openAccess: CommandIO["openAccess"], read: (access: DataA
   }
 }
 
+function runArchivingSettings(args: readonly string[], io: CommandIO) {
+  const [action, ...flags] = args;
+  try {
+    if (action === "get" && flags.length === 0) {
+      return withAccess(io.openAccess, (access) =>
+        createApplicationOperations(access).readArchivingSettings());
+    }
+    if (action !== "set") {
+      throw new CommandFailure("INVALID_ARGUMENTS", "Expected archiving-settings get or set.", 2);
+    }
+    const { options, mutationKey } = mutationOptions(
+      flags, ["--key", "--enabled"], "Invalid Archiving settings options.",
+    );
+    const enabled = options.get("--enabled");
+    const automaticallyArchiveInsertedDvds =
+      enabled === "true" ? true : enabled === "false" ? false : undefined;
+    return withAccess(io.openAccess, (access) =>
+      createApplicationOperations(access).setArchivingSettings({
+        mutationKey, automaticallyArchiveInsertedDvds,
+      }));
+  } catch (error) {
+    if (error instanceof CommandFailure) throw error;
+    if (error instanceof InvalidArchivingSettingsInputError) {
+      throw new CommandFailure("INVALID_ARGUMENTS", error.message, 2);
+    }
+    if (error instanceof MutationKeyConflictError) {
+      throw new CommandFailure("MUTATION_KEY_CONFLICT", error.message, 2);
+    }
+    throw new CommandFailure("ARCHIVING_SETTINGS_UNAVAILABLE", "Archiving settings are unavailable.", 1);
+  }
+}
+
 async function withAccessAsync<T>(
   openAccess: CommandIO["openAccess"],
   read: (access: DataAccess) => Promise<T>,
@@ -2268,6 +2308,11 @@ export async function runCommand(args: readonly string[], io: CommandIO): Promis
         throw new CommandFailure("INVALID_ARGUMENTS", "generate-key takes no arguments.", 2);
       }
       emit(io.stdout, { mutationKey: generateMutationKey() });
+      return 0;
+    }
+    if (name === "archiving-settings") {
+      emit(io.stdout, rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")
+        ? help(name) : runArchivingSettings(rest, io));
       return 0;
     }
     if (name === "notifications") {

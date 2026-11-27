@@ -410,6 +410,10 @@ function visibleDisc({ scanData: _scanData, ...disc }: DetectedDisc) {
   return disc;
 }
 
+function visibleArchiveRequest({ origin: _origin, ...request }: ArchiveRequest) {
+  return request;
+}
+
 function visibleIncident(incident: WorkerIncident) {
   return {
     ...incident,
@@ -717,7 +721,8 @@ function readList(
     case "archive-requests":
       return recentWork(access.archiveRequests.list(undefined, {
         policy: boundedPolicy(limit),
-      }), ["pending", "running", "needs_attention", "cancellation_requested"], limit);
+      }), ["pending", "running", "needs_attention", "cancellation_requested"], limit)
+        .map(visibleArchiveRequest);
     case "archive-jobs":
       return recentWork(access.archiveJobs.list(undefined, {
         policy: boundedPolicy(limit),
@@ -781,8 +786,8 @@ function readDetail(
         ...visibleDisc(disc), scanData: disc.scanData,
         inspections: access.discInspections.list({ detectedDiscId: disc.id })
           .map(visibleInspection),
-        archiveRequests: requests,
-        currentArchiveRequest: relevantRequest,
+        archiveRequests: requests.map(visibleArchiveRequest),
+        currentArchiveRequest: relevantRequest === null ? null : visibleArchiveRequest(relevantRequest),
         archiveJobs: access.archiveJobs.list(undefined, {
           detectedDiscIds: [disc.id],
         }).map(visibleArchiveJob),
@@ -812,7 +817,7 @@ function readDetail(
       const request = access.archiveRequests.find(id as ArchiveRequestId);
       if (!request) return null;
       return {
-        ...request,
+        ...visibleArchiveRequest(request),
         waiting: describeArchiveRequestWaitingStatus(
           access.archiveRequests.waitingStatus(request.id),
         ),
@@ -828,6 +833,7 @@ function readDetail(
     case "archive-jobs": {
       const job = access.archiveJobs.find(id as ArchiveJobId);
       if (!job) return null;
+      const request = access.archiveRequests.find(job.archiveRequestId);
       const archives = job.originalDiscArchiveId === null
         ? []
         : access.catalog.listOriginalDiscArchives({
@@ -839,7 +845,7 @@ function readDetail(
         detectedDisc: access.catalog.listDetectedDiscs(undefined, {
           ids: [job.detectedDiscId],
         }).map(visibleDisc)[0] ?? null,
-        archiveRequest: access.archiveRequests.find(job.archiveRequestId),
+        archiveRequest: request === null ? null : visibleArchiveRequest(request),
         discInspection: job.discInspectionId === null ? null :
           access.discInspections.list({ ids: [job.discInspectionId] })
             .map(visibleInspection)[0] ?? null,

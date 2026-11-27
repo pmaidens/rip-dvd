@@ -419,6 +419,24 @@ export const discInspectionAttempts = sqliteTable(
   ],
 );
 
+export const archivingSettings = sqliteTable(
+  "archiving_settings",
+  {
+    id: integer("id").primaryKey(),
+    automaticallyArchiveInsertedDvds: integer(
+      "automatically_archive_inserted_dvds",
+      { mode: "boolean" },
+    ).notNull(),
+  },
+  (table) => [
+    check("archiving_settings_singleton", sql`${table.id} = 1`),
+    check(
+      "archiving_settings_automatic_dvds_boolean",
+      sql`${table.automaticallyArchiveInsertedDvds} in (0, 1)`,
+    ),
+  ],
+);
+
 export const archiveRequests = sqliteTable(
   "archive_requests",
   {
@@ -435,6 +453,7 @@ export const archiveRequests = sqliteTable(
     evidenceFormat: text("evidence_format", {
       enum: DVD_ARCHIVE_EVIDENCE_FORMATS,
     }).$type<DvdArchiveEvidenceFormat>(),
+    origin: text("origin", { enum: ["manual", "automatic"] }),
     status: text("status", { enum: ARCHIVE_REQUEST_STATUSES })
       .notNull()
       .default("pending"),

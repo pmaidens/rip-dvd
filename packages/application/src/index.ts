@@ -124,6 +124,13 @@ export class InvalidProfileInputError extends Error {
   }
 }
 
+export class InvalidArchivingSettingsInputError extends Error {
+  constructor() {
+    super("automaticallyArchiveInsertedDvds must be a boolean.");
+    this.name = "InvalidArchivingSettingsInputError";
+  }
+}
+
 export interface RearchiveMappingProposalOperationInput
   extends RearchiveMappingProposalRevisions<string> {
   originalDiscArchiveId: string;
@@ -346,6 +353,26 @@ export function createApplicationOperations(
     ...createNotificationOperations(access),
     health: () => access.checkHealth(),
     readiness: () => access.readConsistentSnapshot(readDeploymentReadiness),
+    readArchivingSettings: () => ({
+      schemaVersion: 1,
+      ...access.archivingSettings.read(),
+    }),
+    setArchivingSettings: (input: {
+      mutationKey: unknown;
+      automaticallyArchiveInsertedDvds: unknown;
+    }) => {
+      const mutationKey = parseMutationKey(input.mutationKey);
+      if (typeof input.automaticallyArchiveInsertedDvds !== "boolean") {
+        throw new InvalidArchivingSettingsInputError();
+      }
+      return {
+        schemaVersion: 1,
+        ...access.archivingSettings.set({
+          mutationKey,
+          automaticallyArchiveInsertedDvds: input.automaticallyArchiveInsertedDvds,
+        }),
+      };
+    },
     listEncodingProfiles: () => ({
       schemaVersion: 1,
       profiles: access.encodingProfiles.list({ mediaDomain: "dvd_video" }).map(toEncodingProfileDto),

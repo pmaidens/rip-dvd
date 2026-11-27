@@ -36,6 +36,26 @@ test("opens Settings from primary navigation with addressable configuration sect
   await expect(page.getByRole("heading", { name: "Encoding Profiles", level: 2 })).toBeVisible();
 });
 
+test("changes automatic archiving in Settings and keeps the saved value after reload", async ({ page }) => {
+  await page.goto("/settings");
+  await page.getByRole("navigation", { name: "Settings sections" })
+    .getByRole("link", { name: "Archiving", exact: true }).click();
+  await expect(page).toHaveURL("/settings#archiving");
+  const section = page.getByRole("region", { name: "Archiving", exact: true });
+  const automatic = section.getByRole("checkbox", { name: "Automatically archive inserted DVDs" });
+  await expect(automatic).toBeEnabled();
+  await expect(automatic).not.toBeChecked();
+  await automatic.check();
+  await expect(section.getByRole("status")).toHaveText("Automatic archiving enabled.");
+  await page.reload();
+  await expect(automatic).toBeChecked();
+  await automatic.uncheck();
+  await expect(section.getByRole("status")).toHaveText("Automatic archiving disabled.");
+  await page.reload();
+  await expect(automatic).toBeEnabled();
+  await expect(automatic).not.toBeChecked();
+});
+
 for (const section of [
   { name: "Notifications", hash: "notifications", control: "Check notification status" },
   { name: "Encoding Profiles", hash: "encoding-profiles", control: "Profile key" },
