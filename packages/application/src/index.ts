@@ -265,6 +265,7 @@ export { applyMappingProposal } from "./mapping-proposal-operations.js";
 export type { MappingProposalCommand } from "./mapping-proposal-operations.js";
 
 export {
+  describeDetectedDiscArchiveAction,
   encodeRequeueAvailability,
   inspectOperations,
   inspectOperationsWithArtifacts,

@@ -660,8 +660,8 @@ export function readDetectedDiscArchiveRequest(
   }
 }
 
-function detectedDiscActions(
-  disc: DetectedDisc,
+export function describeDetectedDiscArchiveAction(
+  disc: Pick<DetectedDisc, "status">,
   { request, unavailable }: ReturnType<typeof readDetectedDiscArchiveRequest>,
 ) {
   const eligible = !unavailable && ((disc.status === "scanned" &&
@@ -672,7 +672,7 @@ function detectedDiscActions(
     : request && request.status !== "cancelled"
     ? `Archive Request is ${request.status}.`
     : `Detected Disc is ${disc.status}.`;
-  return [{
+  return {
     name: "request-archive",
     eligible,
     requiredInputs: ["mutationKey", "detectedDiscId"],
@@ -681,7 +681,7 @@ function detectedDiscActions(
       code: unavailable ? "ARCHIVE_REQUEST_IDENTITY_UNAVAILABLE" : "INVALID_TRANSITION",
       message: reason,
     }],
-  }];
+  };
 }
 
 function activity(access: ConsistentReadAccess, limit: number) {
@@ -823,7 +823,7 @@ function readDetail(
         archives: archives.map((archive) =>
           visibleArchive(archive, evidenceHeaders)
         ),
-        availableActions: detectedDiscActions(disc, archiveRequest),
+        availableActions: [describeDetectedDiscArchiveAction(disc, archiveRequest)],
       };
     }
     case "disc-inspections": {

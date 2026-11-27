@@ -23,6 +23,7 @@ import {
   pollArchiveWorkerForTest as pollArchiveWorker,
   startArchiveJob,
 } from "../test/archive-job-fixture";
+import { createDashboardEventResponse } from "../app/api/dashboard/events/route";
 import { createDashboardResponse } from "../app/api/dashboard/route";
 import { InvestigationPanel } from "./investigation-panel";
 import { DashboardView } from "./operations-dashboard";
@@ -67,6 +68,29 @@ describe("database-backed dashboard over HTTP", () => {
       const claim = access.archiveJobs.startForInspection(initial.inspection.id, "synthetic-first-worker");
       expect(claim?.archiveRequestId).toBe(request?.id);
       access.archiveJobs.fail(claim!, "Synthetic initial copy failure");
+
+      async function firstAttemptActivityRevision() {
+        const abort = new AbortController();
+        try {
+          const response = createDashboardEventResponse(access, { signal: abort.signal });
+          const event = (await response.body!.getReader().read()).value;
+          const data = new TextDecoder().decode(event).split("\n")
+            .find((line) => line.startsWith("data: "));
+          const snapshot = JSON.parse(data!.slice("data: ".length)) as DashboardSnapshot;
+          const attempt = snapshot.archiveJobs.status === "loaded"
+            ? snapshot.archiveJobs.items.find(({ id }) => id === claim!.id)
+            : undefined;
+          expect(attempt).toMatchObject({
+            status: "failed", activityRevision: expect.any(String),
+          });
+          expect(attempt?.investigation).toBeUndefined();
+          return attempt!.activityRevision;
+        } finally {
+          abort.abort();
+        }
+      }
+
+      const firstFailureRevision = await firstAttemptActivityRevision();
       access.discInspections.clearCurrent({ opticalDriveId: initial.drive.id, reasonCode: "no_medium" });
       const current = inspectDvd("second");
       let attemptCount = 1;
@@ -115,6 +139,7 @@ describe("database-backed dashboard over HTTP", () => {
       await expectRequest("needs_attention", "Retry archive", false);
       access.discInspections.clearCurrent({ opticalDriveId: current.drive.id, reasonCode: "no_medium" });
       completeDiscInspection(access, initial.disc, "synthetic-check-first-attempt", 8_192);
+      expect(await firstAttemptActivityRevision()).not.toBe(firstFailureRevision);
       const returned = (await createDashboardResponse(access).json()) as DashboardSnapshot;
       expect(returned.archiveJobs).toMatchObject({
         status: "loaded",

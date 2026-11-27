@@ -2,6 +2,7 @@ import {
   describeCatalogReviewWorkflow,
   describeArchiveRequestWaitingStatus,
   describeArchiveJobTiming,
+  describeDetectedDiscArchiveAction,
   type ArchiveJobTiming,
   encodeOutputArtifactReferences,
   encodeRequeueAvailability,
@@ -199,6 +200,7 @@ export interface DashboardDetectedDisc {
   detectedAt: string;
   archiveRequest?: DashboardArchiveRequest | null;
   archiveRequestUnavailable?: true;
+  canRequestArchive?: true;
 }
 
 export interface DashboardDetectedDiscDetails {
@@ -1897,6 +1899,9 @@ function readDashboardSnapshotRecords(
               const request = requestSource?.status === "loaded" ? requestSource.value.request : null;
               const requestUnavailable = requestSource?.status === "error" ||
                 requestSource?.value.unavailable === true;
+              const archiveAction = describeDetectedDiscArchiveAction(disc, {
+                request, unavailable: requestUnavailable,
+              });
               const retryBlocked = request?.status === "needs_attention" && !isArchiveRequestRetryable(request);
               const requestJobs = request === null
                 ? []
@@ -1918,6 +1923,7 @@ function readDashboardSnapshotRecords(
                   : [],
                 detectedAt: disc.detectedAt.toISOString(),
                 ...(requestUnavailable ? { archiveRequestUnavailable: true as const } : {}),
+                ...(archiveAction.eligible ? { canRequestArchive: true as const } : {}),
                 archiveRequest: request === null ? null : {
                   id: request.id,
                   status: request.status,
@@ -1965,6 +1971,22 @@ function readDashboardSnapshotRecords(
               ? drivesById.get(disc.opticalDriveId)
               : undefined;
             const timing = describeArchiveJobTiming(job, observedAt);
+            const request = requestsById?.get(job.archiveRequestId);
+            const latestAttemptId = latestArchiveJobByRequest
+              ?.get(job.archiveRequestId)?.id;
+            const baseRevision = job.evidenceFormat === "dvd-recovery-evidence-v1" &&
+                job.originalDiscArchiveId !== null
+              ? archiveArtifactActivityRevisions.get(job.originalDiscArchiveId) ??
+                job.updatedAt.toISOString()
+              : job.updatedAt.toISOString();
+            const activityRevision = job.status === "failed"
+              ? createHash("sha256").update(JSON.stringify([
+                  baseRevision,
+                  latestAttemptId ?? null,
+                  request?.status ?? null,
+                  isArchiveRequestRetryable(request),
+                ])).digest("hex")
+              : baseRevision;
             return {
               id: job.id,
               ...(job.evidenceFormat === "dvd-recovery-evidence-v1" &&
@@ -1974,13 +1996,7 @@ function readDashboardSnapshotRecords(
                     recoveryArtifact: true,
                   }
                 : {}),
-              activityRevision: job.evidenceFormat ===
-                    "dvd-recovery-evidence-v1" &&
-                  job.originalDiscArchiveId !== null
-                ? archiveArtifactActivityRevisions.get(
-                    job.originalDiscArchiveId,
-                  ) ?? job.updatedAt.toISOString()
-                : job.updatedAt.toISOString(),
+              activityRevision,
               archiveRequestId: job.archiveRequestId,
               attemptOrdinal: job.attemptOrdinal,
               detectedDiscId: job.detectedDiscId,
@@ -2003,10 +2019,8 @@ function readDashboardSnapshotRecords(
                 ? {
                     investigation: archiveJobInvestigation({
                       job,
-                      request: requestsById?.get(job.archiveRequestId),
-                      isLatestAttempt:
-                        latestArchiveJobByRequest
-                          ?.get(job.archiveRequestId)?.id === job.id,
+                      request,
+                      isLatestAttempt: latestAttemptId === job.id,
                     }),
                   }
                 : {}),

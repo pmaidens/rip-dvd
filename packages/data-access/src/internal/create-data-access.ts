@@ -7607,6 +7607,7 @@ export function createDataAccessInternal(
     detectedDiscId: DetectedDiscId;
     evidenceFormat?: DvdArchiveEvidenceFormat;
     priority?: number;
+    approveReusedDisc?: true;
   }, mutationKey?: string) {
     const timestamp = now();
     return database.transaction((transaction) => {
@@ -7710,6 +7711,9 @@ export function createDataAccessInternal(
         assertDvdRecoveryEvidenceAdmissionAvailable(
           reusableRequest?.evidenceFormat,
         );
+        if (reusableRequest !== undefined && input.approveReusedDisc) {
+          approveScannedDisc(transaction, disc, timestamp);
+        }
         if (
           reusableRequest?.status === "needs_attention" &&
           reusableRequest.origin !== "automatic"
@@ -16023,7 +16027,7 @@ export function createDataAccessInternal(
 
       updateDetectedDiscStatus(id, status) {
         if (status === "approved") {
-          createArchiveRequest({ detectedDiscId: id });
+          createArchiveRequest({ detectedDiscId: id, approveReusedDisc: true });
           return requireRow(
             database
               .select()

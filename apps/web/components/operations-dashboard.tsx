@@ -1198,11 +1198,6 @@ function DetectedDiscItem({
     );
   }
 
-  const canRequestArchive = !disc.archiveRequestUnavailable && (
-    (disc.status === "scanned" &&
-      (disc.archiveRequest == null || disc.archiveRequest.status === "cancelled")) ||
-    (disc.status === "approved" &&
-      disc.archiveRequest?.status === "cancelled"));
   const isReplacementRequest = disc.archiveRequest?.status === "cancelled";
 
   return (
@@ -1216,7 +1211,7 @@ function DetectedDiscItem({
       </div>
       <DetectedDiscDetails disc={disc} />
       {disc.archiveRequestUnavailable ? <p>Archive Request status is unavailable.</p> : null}
-      {canRequestArchive ? (
+      {disc.canRequestArchive ? (
         <button
           type="button"
           disabled={approvingDetectedDiscId !== null}

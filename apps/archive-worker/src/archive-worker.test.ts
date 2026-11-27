@@ -1319,6 +1319,10 @@ describe("automatic Archive Request admission", () => {
       expect(access.archiveRequests.submit({
         detectedDiscId: alternate.id, mutationKey: "synthetic-click-existing-manual-work",
       })).toEqual(manual);
+      expect(access.catalog.listDetectedDiscs(undefined, { ids: [alternate.id] })[0]?.status)
+        .toBe("scanned");
+      expect(access.catalog.updateDetectedDiscStatus(alternate.id, "approved").status)
+        .toBe("approved");
       expect(access.archiveRequests.list()).toEqual([manual]);
 
       await fixture.poll({ copyRunner, originalsLibraryPath });
