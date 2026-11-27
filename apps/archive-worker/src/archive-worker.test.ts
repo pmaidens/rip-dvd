@@ -1108,6 +1108,12 @@ function automaticArchivingFixture() {
   };
 }
 
+function archiveWorkerTestGate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
 describe("automatic Archive Request admission", () => {
   it("picks up a DVD already inspected before opt-in and archives it through the ordinary scheduler", async () => {
     const fixture = automaticArchivingFixture();
@@ -1170,8 +1176,8 @@ describe("automatic Archive Request admission", () => {
   it("keeps automatic work pending while the ordinary scheduler uses its slot for higher-priority work", async () => {
     const fixture = automaticArchivingFixture();
     const { access, copyRunner, first, second, originalsLibraryPath } = fixture;
-    const copyStarted = Promise.withResolvers<void>();
-    const finishCopy = Promise.withResolvers<void>();
+    const copyStarted = archiveWorkerTestGate();
+    const finishCopy = archiveWorkerTestGate();
     let pendingPoll: Promise<void> | undefined;
     try {
       fixture.insert(first, `dvdmeta-sha256:${"b".repeat(64)}`);
@@ -1188,7 +1194,7 @@ describe("automatic Archive Request admission", () => {
 
       const copy = copyRunner.copy.getMockImplementation()!;
       copyRunner.copy.mockImplementationOnce(async (options) => {
-        copyStarted.resolve();
+        copyStarted.release();
         await finishCopy.promise;
         return copy(options);
       });
@@ -1198,12 +1204,12 @@ describe("automatic Archive Request admission", () => {
         expect.objectContaining({ archiveRequestId: manual.id, status: "running" }),
       ]);
       expect(access.archiveRequests.find(automatic.id)).toEqual(automatic);
-      finishCopy.resolve();
+      finishCopy.release();
       await pendingPoll;
       expect(access.archiveRequests.list(["fulfilled"])).toHaveLength(2);
       expect(access.archiveJobs.list(["completed"])).toHaveLength(2);
     } finally {
-      finishCopy.resolve();
+      finishCopy.release();
       await pendingPoll;
       fixture.close();
     }
@@ -1215,8 +1221,8 @@ describe("automatic Archive Request admission", () => {
       const fixture = automaticArchivingFixture();
       const { access, hardware, first, second } = fixture;
       const fingerprint = `dvdmeta-sha256:${"4".repeat(64)}`;
-      const paused = Promise.withResolvers<void>();
-      const resume = Promise.withResolvers<void>();
+      const paused = archiveWorkerTestGate();
+      const resume = archiveWorkerTestGate();
       let pendingPoll: Promise<void> | undefined;
       try {
         fixture.insert(first, fingerprint);
@@ -1230,7 +1236,7 @@ describe("automatic Archive Request admission", () => {
 
         const observe = hardware.observeMedia.getMockImplementation()!;
         hardware.observeMedia.mockImplementationOnce(async (...args) => {
-          paused.resolve();
+          paused.release();
           await resume.promise;
           return observe(...args);
         });
@@ -1245,7 +1251,7 @@ describe("automatic Archive Request admission", () => {
           expect(access.archiveRequests.list()[0]?.detectedDiscId).toBe(firstDisc!.id);
         }
         const accepted = clickArchive();
-        resume.resolve();
+        resume.release();
         await pendingPoll;
         await fixture.poll();
         expect(access.archiveRequests.list()).toEqual([
@@ -1253,7 +1259,7 @@ describe("automatic Archive Request admission", () => {
         ]);
         expect(access.archiveJobs.list()).toEqual([]);
       } finally {
-        resume.resolve();
+        resume.release();
         await pendingPoll;
         fixture.close();
       }
