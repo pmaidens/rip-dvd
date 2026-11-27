@@ -28,9 +28,9 @@ test("requests an archive on an ordinary HTTP origin", async ({ page }, testInfo
 test("keeps automatic Archive Request origin through reload and Retry until a manual replacement", async ({ page }, testInfo) => {
   const variant = testInfo.project.name === "desktop" ? "desktop" : "mobile";
   await page.goto("/discs");
-  const disc = page.getByRole("article").filter({
-    has: page.getByRole("heading", { name: `HTTP archive fixture automatic-${variant}`, exact: true }),
-  });
+  const disc = page.getByRole("article")
+    .filter({ has: page.getByRole("heading", { name: `HTTP archive fixture automatic-${variant}`, exact: true }) })
+    .filter({ has: page.getByRole("region", { name: "Archive Request", exact: true }) });
   const origin = disc.getByText("Requested automatically", { exact: true });
   const retry = disc.getByRole("button", { name: "Retry archive", exact: true });
   const cancel = disc.getByRole("button", { name: "Cancel request", exact: true });
