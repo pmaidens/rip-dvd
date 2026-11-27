@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "e350b1fc-8f37-49c8-8c1d-418107c459e5",
+  "id": "6aad6008-c985-47fa-86ec-ac67d6d99a78",
   "prevIds": [
     "10cf3aba-7091-4d0b-b6b9-7848dc15ca7b"
   ],
@@ -8955,6 +8955,28 @@
     {
       "columns": [
         {
+          "value": "detected_disc_id",
+          "isExpression": false
+        },
+        {
+          "value": "updated_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "\"archive_requests\".\"status\" = 'cancelled'",
+      "origin": "manual",
+      "name": "archive_requests_cancelled_disc_updated_idx",
+      "entityType": "indexes",
+      "table": "archive_requests"
+    },
+    {
+      "columns": [
+        {
           "value": "rearchive_source_archive_id",
           "isExpression": false
         },
@@ -9091,6 +9113,20 @@
       "where": null,
       "origin": "manual",
       "name": "detected_discs_drive_fingerprint_unique",
+      "entityType": "indexes",
+      "table": "detected_discs"
+    },
+    {
+      "columns": [
+        {
+          "value": "fingerprint",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "detected_discs_fingerprint_idx",
       "entityType": "indexes",
       "table": "detected_discs"
     },
@@ -10696,6 +10732,12 @@
       "name": "archive_requests_terminal_fields_check",
       "entityType": "checks",
       "table": "archive_requests"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "archiving_settings_id_not_null",
+      "entityType": "checks",
+      "table": "archiving_settings"
     },
     {
       "value": "\"id\" = 1",

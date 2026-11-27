@@ -1470,22 +1470,21 @@ function readDashboardSnapshotRecords(
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];
-  const matchingAutomaticRequests = readSource(() => new Map(
-    displayedDetectedDiscIds.map((id) => [id, access.archiveRequests.findMatchingAutomaticArchiveRequest(id)]),
+  const relevantArchiveRequests = readSource(() => new Map(
+    displayedDetectedDiscIds.map((id) => [id, access.archiveRequests.findRelevantForDetectedDisc(id)]),
   ));
-  const archiveRequestSource = readSource(() =>
-    activityLimit === undefined
-      ? access.archiveRequests.list()
-      : access.archiveRequests.listRelevantForDetectedDiscs(
-          [...new Set(displayedDetectedDiscIds)],
-        ),
-  );
+  const displayedArchiveRequests = relevantArchiveRequests.status === "loaded"
+    ? [...new Map([...relevantArchiveRequests.value.values()].flatMap((request) =>
+        request === null ? [] : [[request.id, request] as const],
+      )).values()]
+    : [];
+  const archiveRequestSource = activityLimit === undefined
+    ? readSource(() => access.archiveRequests.list())
+    : relevantArchiveRequests.status === "error"
+      ? relevantArchiveRequests
+      : { status: "loaded" as const, value: displayedArchiveRequests };
   const latestRequestJobSource = readSource(() =>
-    activityLimit === undefined || archiveRequestSource.status === "error"
-      ? []
-      : access.archiveJobs.listLatestForRequests(
-          [...new Set(archiveRequestSource.value.map((request) => request.id))],
-        ),
+    access.archiveJobs.listLatestForRequests(displayedArchiveRequests.map((request) => request.id)),
   );
   const encodeJobSource = readSource(() =>
     access.encodeJobs.list(
@@ -1832,26 +1831,6 @@ function readDashboardSnapshotRecords(
         archiveRequestSource.value.map((request) => [request.id, request]),
       )
     : null;
-  const relevantJobByDetectedDiscId = archiveJobSource.status === "loaded"
-    ? archiveJobSource.value.reduce((relevantByDisc, job) => {
-        const relevant = relevantByDisc.get(job.detectedDiscId);
-        const jobIsRunning = job.status === "running";
-        const relevantIsRunning = relevant?.status === "running";
-        if (
-          relevant === undefined ||
-          (jobIsRunning && !relevantIsRunning) ||
-          (jobIsRunning === relevantIsRunning &&
-            job.updatedAt > relevant.updatedAt) ||
-          (jobIsRunning === relevantIsRunning &&
-            job.updatedAt.getTime() === relevant.updatedAt.getTime() &&
-            job.id > relevant.id)
-        ) {
-          relevantByDisc.set(job.detectedDiscId, job);
-        }
-        return relevantByDisc;
-      }, new Map<ArchiveJob["detectedDiscId"], ArchiveJob>())
-    : null;
-
   const opticalDrives =
     opticalDriveSource.status === "error" ||
     currentInspectionByDrive === null
@@ -1912,36 +1891,15 @@ function readDashboardSnapshotRecords(
     detectedDiscSource.status === "error" ||
     drivesById === null ||
     requestByDiscId === null ||
-    matchingAutomaticRequests.status === "error" ||
+    relevantArchiveRequests.status === "error" ||
     requestsById === null ||
-    relevantJobByDetectedDiscId === null ||
     jobsByRequestId === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
           return loaded(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
-              const relevantDiscJob = relevantJobByDetectedDiscId.get(disc.id);
-              const linkedRequest = relevantDiscJob === undefined
-                ? undefined
-                : requestsById.get(relevantDiscJob.archiveRequestId);
-              const ownedRequest = requestByDiscId.get(disc.id);
-              const localRequest = linkedRequest === undefined
-                ? ownedRequest
-                : ownedRequest === undefined
-                  ? linkedRequest
-                  : !["fulfilled", "cancelled"].includes(linkedRequest.status) &&
-                      (["fulfilled", "cancelled"].includes(ownedRequest.status) ||
-                        linkedRequest.updatedAt > ownedRequest.updatedAt)
-                    ? linkedRequest
-                    : ownedRequest;
-              const matchingRequest = matchingAutomaticRequests.value.get(disc.id) ?? undefined;
-              const request = localRequest === undefined ||
-                (matchingRequest !== undefined &&
-                  !["fulfilled", "cancelled"].includes(matchingRequest.status) &&
-                  ["fulfilled", "cancelled"].includes(localRequest.status))
-                ? matchingRequest
-                : localRequest;
+              const request = relevantArchiveRequests.value.get(disc.id) ?? undefined;
               const requestJobs = request === undefined
                 ? []
                 : (jobsByRequestId.get(request.id) ?? []);

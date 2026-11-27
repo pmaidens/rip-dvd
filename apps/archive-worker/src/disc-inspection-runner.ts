@@ -578,6 +578,7 @@ export async function runDiscInspection({
     inspection = access.discInspections.record(claim, {
       type: "complete",
       detectedDiscId: disc.id,
+      publishScanned: true,
     });
     return {
       binding,

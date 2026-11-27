@@ -49,7 +49,9 @@ describe("database-backed dashboard over HTTP", () => {
           },
         });
         expect(disc.status).toBe("detected");
-        const inspection = completeDiscInspection(access, disc, `synthetic-generation-${suffix}`, 8_192);
+        const inspection = completeDiscInspection(
+          access, disc, `synthetic-generation-${suffix}`, 8_192, { publishScanned: true },
+        );
         expect(access.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]?.status).toBe("scanned");
         return { drive, disc, inspection };
       };
@@ -65,19 +67,27 @@ describe("database-backed dashboard over HTTP", () => {
       access.discInspections.clearCurrent({ opticalDriveId: initial.drive.id, reasonCode: "no_medium" });
       const current = inspectDvd("second");
 
-      async function expectRequest(status: string, button: string, canRequest: boolean) {
+      async function expectRequest(
+        status: string,
+        button: string,
+        canRequest: boolean,
+        expected = { discId: current.disc.id, requestId: request!.id, attemptCount: 1 },
+      ) {
         const dashboard = (await createDashboardResponse(access).json()) as DashboardSnapshot;
         expect(dashboard.detectedDiscs).toMatchObject({
           status: "loaded",
-          items: [{ id: current.disc.id, archiveRequest: { id: request!.id, status, attemptCount: 1 } }],
+          items: [{
+            id: expected.discId,
+            archiveRequest: { id: expected.requestId, status, attemptCount: expected.attemptCount },
+          }],
         });
         const html = renderToStaticMarkup(<DashboardView state={dashboard} section="discs" />);
         expect(html).toContain(button);
         if (!canRequest) expect(html).not.toContain("Request archive");
-        expect(await fixture.run(["inspect", "detected-discs", current.disc.id])).toMatchObject({
+        expect(await fixture.run(["inspect", "detected-discs", expected.discId])).toMatchObject({
           exitCode: 0,
           result: { item: {
-            currentArchiveRequest: { id: request!.id, status },
+            currentArchiveRequest: { id: expected.requestId, status },
             availableActions: [{ name: "request-archive", eligible: canRequest }],
           } },
         });
@@ -90,6 +100,17 @@ describe("database-backed dashboard over HTTP", () => {
       expect(await fixture.run(["cancel-archive-request", "--key", "synthetic-automatic-cancel", "--archive-request-id", request!.id]))
         .toMatchObject({ exitCode: 0 });
       await expectRequest("cancelled", "Request archive again", true);
+
+      const replacement = access.archiveRequests.submit({
+        detectedDiscId: current.disc.id, mutationKey: "synthetic-request-after-cancel",
+      });
+      expect(replacement.id).not.toBe(request!.id);
+      expect(replacement.origin).toBe("manual");
+      access.discInspections.clearCurrent({ opticalDriveId: current.drive.id, reasonCode: "no_medium" });
+      completeDiscInspection(access, initial.disc, "synthetic-return-first-drive", 8_192);
+      await expectRequest("pending", "Cancel request", false, {
+        discId: initial.disc.id, requestId: replacement.id, attemptCount: 0,
+      });
     } finally {
       access.close();
       fixture.dispose();

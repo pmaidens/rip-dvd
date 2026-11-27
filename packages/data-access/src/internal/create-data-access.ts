@@ -3026,45 +3026,36 @@ export function createDataAccessInternal(
     }, { behavior: "immediate" });
   }
 
-  function uniqueDeclaredByteCount(
-    byteCounts: readonly (number | null)[],
-  ): number | null {
-    const observed = new Set(
-      byteCounts.filter((byteCount): byteCount is number =>
-        byteCount !== null
-      ),
-    );
-    return observed.size === 1 ? [...observed][0]! : null;
-  }
-
   function declaredByteCountFromCompletedInspections(
     reader: Pick<typeof database, "select">,
     detectedDiscId: DetectedDiscId,
     currentOnly = false,
   ): number | null {
-    return uniqueDeclaredByteCount(
-      reader
-        .select({ totalBytes: discInspections.totalBytes })
-        .from(discInspections)
-        .where(
-          and(
-            eq(discInspections.detectedDiscId, detectedDiscId),
-            currentOnly ? eq(discInspections.isCurrent, true) : undefined,
-            eq(discInspections.status, "completed"),
-            isNotNull(discInspections.totalBytes),
-          ),
-        )
-        .all()
-        .map(({ totalBytes }) => totalBytes),
-    );
+    const bounds = reader
+      .select({
+        minimum: sql<number | null>`min(${discInspections.totalBytes})`,
+        maximum: sql<number | null>`max(${discInspections.totalBytes})`,
+      })
+      .from(discInspections)
+      .where(and(
+        eq(discInspections.detectedDiscId, detectedDiscId),
+        currentOnly ? eq(discInspections.isCurrent, true) : undefined,
+        eq(discInspections.status, "completed"),
+        isNotNull(discInspections.totalBytes),
+      ))
+      .get();
+    return bounds && bounds.minimum === bounds.maximum ? bounds.minimum : null;
   }
 
-  function attemptedDeclaredByteCountsForArchiveRequest(
+  function attemptedDeclaredByteCountBounds(
     transaction: Pick<typeof database, "select">,
     archiveRequestId: ArchiveRequestId,
-  ): (number | null)[] {
+  ) {
     return transaction
-      .select({ totalBytes: discInspections.totalBytes })
+      .select({
+        minimum: sql<number | null>`min(${discInspections.totalBytes})`,
+        maximum: sql<number | null>`max(${discInspections.totalBytes})`,
+      })
       .from(archiveJobs)
       .innerJoin(
         discInspections,
@@ -3076,8 +3067,7 @@ export function createDataAccessInternal(
           isNotNull(discInspections.totalBytes),
         ),
       )
-      .all()
-      .map(({ totalBytes }) => totalBytes);
+      .get();
   }
 
   function declaredByteCountForArchiveRequest(
@@ -3085,12 +3075,12 @@ export function createDataAccessInternal(
     archiveRequestId: ArchiveRequestId,
     requestedDetectedDiscId: DetectedDiscId,
   ): number | null {
-    const attemptedByteCounts = attemptedDeclaredByteCountsForArchiveRequest(
+    const attempted = attemptedDeclaredByteCountBounds(
       transaction,
       archiveRequestId,
     );
-    if (attemptedByteCounts.length > 0) {
-      return uniqueDeclaredByteCount(attemptedByteCounts);
+    if (attempted && attempted.minimum !== null) {
+      return attempted.minimum === attempted.maximum ? attempted.minimum : null;
     }
     const rearchiveSourceArchiveId = transaction
       .select({ id: archiveRequests.rearchiveSourceArchiveId })
@@ -7400,19 +7390,15 @@ export function createDataAccessInternal(
     );
   }
 
-  function matchingArchiveRequestsOnOtherDrives(
+  function matchingActiveArchiveRequestsOnOtherDrives(
     reader: Pick<typeof database, "select">,
     disc: typeof detectedDiscs.$inferSelect,
     currentBytes: number | null,
-    admission: "manual" | "automatic",
   ) {
     // An Archive click can arrive after the DVD moved to the drive that admitted it.
     const sourceBytes = currentBytes ?? declaredByteCountFromCompletedInspections(reader, disc.id);
     if (sourceBytes === null) return [];
-    const statuses = admission === "automatic"
-      ? automaticAdmissionBlockingStatuses
-      : activeArchiveRequestStatuses;
-    return reader
+    const candidates = reader
       .select({
         request: archiveRequests,
         requestedDiscId: requestedDetectedDiscRecords.id,
@@ -7424,17 +7410,70 @@ export function createDataAccessInternal(
         requestedDetectedDiscRecords.id, archiveRequests.detectedDiscId,
       ))
       .where(and(
-        inArray(archiveRequests.status, statuses),
+        inArray(archiveRequests.status, activeArchiveRequestStatuses),
         eq(requestedDetectedDiscRecords.discKind, "dvd"),
         eq(requestedDetectedDiscRecords.fingerprint, disc.fingerprint),
         ne(requestedDetectedDiscRecords.id, disc.id),
       ))
-      .all()
-      .filter((candidate) => archiveRequestMatchesDvdContinuationIdentity(
+      .limit(ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT + 1)
+      .all();
+    if (candidates.length > ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT) {
+      throw new DomainInvariantError("Active Archive Request identity lookup exceeds the safety limit");
+    }
+    return candidates.filter((candidate) => archiveRequestMatchesDvdContinuationIdentity(
         disc, sourceBytes, candidate,
         declaredByteCountForArchiveRequest(reader, candidate.request.id, candidate.requestedDiscId),
         reader,
       ));
+  }
+
+  function latestMatchingCancelledArchiveRequest(
+    reader: Pick<typeof database, "select">,
+    disc: typeof detectedDiscs.$inferSelect,
+    sourceBytes: number,
+  ): ArchiveRequest | null {
+    if (decodeDvdTitleMap(disc.scanData)?.contentId !== disc.fingerprint) return null;
+    const observations = reader.select({
+      id: detectedDiscs.id,
+      scanData: detectedDiscs.scanData,
+    }).from(detectedDiscs).where(and(
+      eq(detectedDiscs.fingerprint, disc.fingerprint),
+      eq(detectedDiscs.discKind, "dvd"),
+      eq(detectedDiscs.status, "approved"),
+      ne(detectedDiscs.id, disc.id),
+    )).limit(ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT + 1).all();
+    if (observations.length > ACTIVE_ARCHIVE_REQUEST_IDENTITY_LIMIT) {
+      throw new DomainInvariantError("Cancelled Archive Request identity lookup exceeds the safety limit");
+    }
+
+    const attemptWithSize = (sizeCondition?: SQL) => reader.select({ id: archiveJobs.id })
+      .from(archiveJobs)
+      .innerJoin(discInspections, eq(discInspections.id, archiveJobs.discInspectionId))
+      .where(and(
+        eq(archiveJobs.archiveRequestId, archiveRequests.id),
+        isNotNull(discInspections.totalBytes),
+        sizeCondition,
+      ));
+    const matches = observations.flatMap(({ id, scanData }) => {
+      if (decodeDvdTitleMap(scanData)?.contentId !== disc.fingerprint) return [];
+      const canUseInspection = declaredByteCountFromCompletedInspections(reader, id) === sourceBytes;
+      const cancelled = reader.select().from(archiveRequests).where(and(
+        eq(archiveRequests.detectedDiscId, id),
+        sql`${archiveRequests.status} = 'cancelled'`,
+        isNull(archiveRequests.rearchiveSourceArchiveId),
+        or(
+          and(
+            exists(attemptWithSize(eq(discInspections.totalBytes, sourceBytes))),
+            notExists(attemptWithSize(ne(discInspections.totalBytes, sourceBytes))),
+          ),
+          canUseInspection ? notExists(attemptWithSize()) : undefined,
+        ),
+      )).orderBy(desc(archiveRequests.updatedAt), desc(archiveRequests.id)).limit(1).get();
+      return cancelled ? [cancelled] : [];
+    });
+    return matches.sort((left, right) =>
+      right.updatedAt.getTime() - left.updatedAt.getTime() || right.id.localeCompare(left.id),
+    )[0] ?? null;
   }
 
   function currentDvdArchiveSource(
@@ -7461,19 +7500,60 @@ export function createDataAccessInternal(
       )).get();
   }
 
-  function findMatchingAutomaticArchiveRequest(detectedDiscId: DetectedDiscId): ArchiveRequest | null {
+  function findMatchingArchiveRequestOnOtherDrive(detectedDiscId: DetectedDiscId): ArchiveRequest | null {
     const source = currentDvdArchiveSource(database, eq(discInspections.detectedDiscId, detectedDiscId));
     if (!source || source.totalBytes === null) return null;
-    const matches = matchingArchiveRequestsOnOtherDrives(
-      database, source.disc, source.totalBytes, "automatic",
-    ).map(({ request }) => request);
-    const active = matches.filter((request) => request.status !== "cancelled");
-    if (active.length > 0) {
-      return active.length === 1 && active[0]?.origin === "automatic" ? active[0] : null;
-    }
-    return matches.filter((request) => request.origin === "automatic").sort((left, right) =>
-      right.updatedAt.getTime() - left.updatedAt.getTime() || right.id.localeCompare(left.id),
-    )[0] ?? null;
+    const active = matchingActiveArchiveRequestsOnOtherDrives(database, source.disc, source.totalBytes);
+    if (active.length > 1) return null;
+    return active[0]?.request ??
+      latestMatchingCancelledArchiveRequest(database, source.disc, source.totalBytes);
+  }
+
+  function findRelevantArchiveRequestForDetectedDisc(detectedDiscId: DetectedDiscId): ArchiveRequest | null {
+    const ownedRequest = database
+      .select()
+      .from(archiveRequests)
+      .where(eq(archiveRequests.detectedDiscId, detectedDiscId))
+      .orderBy(
+        sql`case when ${archiveRequests.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested') then 0 else 1 end`,
+        desc(archiveRequests.updatedAt),
+        desc(archiveRequests.id),
+      )
+      .limit(1)
+      .get();
+    const attemptedRequest = database
+      .select({ request: archiveRequests })
+      .from(archiveJobs)
+      .innerJoin(
+        archiveRequests,
+        eq(archiveRequests.id, archiveJobs.archiveRequestId),
+      )
+      .where(eq(archiveJobs.detectedDiscId, detectedDiscId))
+      .orderBy(
+        sql`case when ${archiveJobs.status} = 'running' then 0 else 1 end`,
+        desc(archiveJobs.updatedAt),
+        desc(archiveJobs.id),
+      )
+      .limit(1)
+      .get()?.request;
+    const matchingRequest = findMatchingArchiveRequestOnOtherDrive(detectedDiscId) ?? undefined;
+    const relevantRequest = [ownedRequest, attemptedRequest, matchingRequest].filter(
+      (request): request is NonNullable<typeof request> =>
+        request !== undefined,
+    ).sort((left, right) => {
+      const leftIsActive = !["fulfilled", "cancelled"].includes(
+        left.status,
+      );
+      const rightIsActive = !["fulfilled", "cancelled"].includes(
+        right.status,
+      );
+      if (leftIsActive !== rightIsActive) {
+        return leftIsActive ? -1 : 1;
+      }
+      return right.updatedAt.getTime() - left.updatedAt.getTime() ||
+        (left.id < right.id ? 1 : left.id === right.id ? 0 : -1);
+    })[0];
+    return relevantRequest ?? null;
   }
 
   function admitAutomaticArchiveRequest({
@@ -7497,9 +7577,10 @@ export function createDataAccessInternal(
           eq(archiveRequests.detectedDiscId, disc.id),
           inArray(archiveRequests.status, automaticAdmissionBlockingStatuses),
         )).get();
-      if (existing || matchingArchiveRequestsOnOtherDrives(
-        transaction, disc, totalBytes, "automatic",
-      ).length > 0) return;
+      if (existing ||
+        matchingActiveArchiveRequestsOnOtherDrives(transaction, disc, totalBytes).length > 0 ||
+        latestMatchingCancelledArchiveRequest(transaction, disc, totalBytes)
+      ) return;
       if (
         findOriginalArchiveByFingerprintOrContentIdAlias(disc.fingerprint, transaction) ||
         dvdArchiveIdentityReconciliationRequired(disc.discKind, disc.fingerprint, transaction)
@@ -7606,10 +7687,9 @@ export function createDataAccessInternal(
         );
       }
       if (disc.discKind === "dvd") {
-        const reusableRequests = matchingArchiveRequestsOnOtherDrives(
+        const reusableRequests = matchingActiveArchiveRequestsOnOtherDrives(
           transaction, disc,
           declaredByteCountFromCompletedInspections(transaction, disc.id, true),
-          "manual",
         );
         if (reusableRequests.length > 1) {
           throw new DomainInvariantError(
@@ -15430,8 +15510,8 @@ export function createDataAccessInternal(
         },
         archiveRequests: {
           find: (id) => access.archiveRequests.find(id),
-          findMatchingAutomaticArchiveRequest: (id) =>
-            access.archiveRequests.findMatchingAutomaticArchiveRequest(id),
+          findRelevantForDetectedDisc: (id) =>
+            access.archiveRequests.findRelevantForDetectedDisc(id),
           list: (statuses, options) =>
             access.archiveRequests.list(statuses, options),
           listForDetectedDisc: (id) =>
@@ -21871,7 +21951,7 @@ export function createDataAccessInternal(
                 "Completed Disc Inspection must link to its Optical Drive observation",
               );
             }
-            if (disc.discKind === "dvd" && disc.status === "detected") {
+            if (event.publishScanned && disc.discKind === "dvd" && disc.status === "detected") {
               // Commit the identity evidence and the operator's eligibility together.
               transaction.update(detectedDiscs)
                 .set({ status: "scanned", updatedAt: timestamp })
@@ -22269,7 +22349,7 @@ export function createDataAccessInternal(
       },
       create: createArchiveRequest,
       admitAutomatically: admitAutomaticArchiveRequest,
-      findMatchingAutomaticArchiveRequest,
+      findRelevantForDetectedDisc: findRelevantArchiveRequestForDetectedDisc,
       submit: ({ mutationKey, detectedDiscId, evidenceFormat }) =>
         createArchiveRequest({
           detectedDiscId,
@@ -22491,50 +22571,8 @@ export function createDataAccessInternal(
             );
           }
           return uniqueIds.flatMap((detectedDiscId) => {
-            const ownedRequest = database
-              .select()
-              .from(archiveRequests)
-              .where(eq(archiveRequests.detectedDiscId, detectedDiscId))
-              .orderBy(
-                sql`case when ${archiveRequests.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested') then 0 else 1 end`,
-                desc(archiveRequests.updatedAt),
-                desc(archiveRequests.id),
-              )
-              .limit(1)
-              .get();
-            const attemptedRequest = database
-              .select({ request: archiveRequests })
-              .from(archiveJobs)
-              .innerJoin(
-                archiveRequests,
-                eq(archiveRequests.id, archiveJobs.archiveRequestId),
-              )
-              .where(eq(archiveJobs.detectedDiscId, detectedDiscId))
-              .orderBy(
-                sql`case when ${archiveJobs.status} = 'running' then 0 else 1 end`,
-                desc(archiveJobs.updatedAt),
-                desc(archiveJobs.id),
-              )
-              .limit(1)
-              .get()?.request;
-            const matchingRequest = findMatchingAutomaticArchiveRequest(detectedDiscId) ?? undefined;
-            const relevantRequest = [ownedRequest, attemptedRequest, matchingRequest].filter(
-              (request): request is NonNullable<typeof request> =>
-                request !== undefined,
-            ).sort((left, right) => {
-              const leftIsActive = !["fulfilled", "cancelled"].includes(
-                left.status,
-              );
-              const rightIsActive = !["fulfilled", "cancelled"].includes(
-                right.status,
-              );
-              if (leftIsActive !== rightIsActive) {
-                return leftIsActive ? -1 : 1;
-              }
-              return right.updatedAt.getTime() - left.updatedAt.getTime() ||
-                (left.id < right.id ? 1 : left.id === right.id ? 0 : -1);
-            })[0];
-            return relevantRequest === undefined ? [] : [relevantRequest];
+            const request = findRelevantArchiveRequestForDetectedDisc(detectedDiscId);
+            return request === null ? [] : [request];
           });
         },
 
