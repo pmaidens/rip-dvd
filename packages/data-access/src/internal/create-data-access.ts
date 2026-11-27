@@ -7623,7 +7623,10 @@ export function createDataAccessInternal(
         if (reusableRequest !== undefined && reusableRequest.origin !== "automatic") {
           approveScannedDisc(transaction, disc, timestamp);
         }
-        if (reusableRequest?.status === "needs_attention") {
+        if (
+          reusableRequest?.status === "needs_attention" &&
+          reusableRequest.origin !== "automatic"
+        ) {
           return saveOutcome(
             requireRow(
               transaction

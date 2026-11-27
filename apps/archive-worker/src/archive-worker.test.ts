@@ -1366,6 +1366,12 @@ describe("automatic Archive Request admission", () => {
 
         const alternateDrive = restarted.catalog.listOpticalDrives().find(({ devicePath }) => devicePath === second);
         const alternateDisc = restarted.catalog.listDetectedDiscs().find(({ opticalDriveId }) => opticalDriveId === alternateDrive?.id);
+        if (stoppedStatus === "needs_attention") {
+          const delayedClick = restarted.archiveRequests.submit({
+            detectedDiscId: alternateDisc!.id, mutationKey: "synthetic-delayed-archive-after-failure",
+          });
+          expect(delayedClick).toMatchObject({ id: stopped!.id, status: "needs_attention" });
+        }
         const requested = stoppedStatus === "cancelled"
           ? restarted.archiveRequests.submit({
               detectedDiscId: alternateDisc!.id, mutationKey: "synthetic-request-archive-again",
