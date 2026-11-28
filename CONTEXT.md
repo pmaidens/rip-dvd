@@ -12,6 +12,42 @@ _Avoid_: Reader, device
 A fingerprinted disc observed in an Optical Drive.
 _Avoid_: Disk, medium
 
+**Disc Record**:
+The description of an inspected disc layout that connects its identified content to its Original Disc Archives. It is distinct from an observation of the disc in an Optical Drive.
+_Avoid_: Detected Disc, Original Disc Archive, Media Item
+
+**Media Item**:
+Named catalog content, such as a Movie, TV Show, Season, or Episode, that can be associated with content on multiple discs.
+_Avoid_: Disc Record, Original Disc Archive, Release
+
+**Catalog**:
+The overall library of identified content and its relationships to discs.
+_Avoid_: Disc Catalog, Original Disc Archive
+
+**Disc Catalog**:
+The identified contents of one Disc Record, including title-to-content mappings, content roles, named extras, and dismissals. It is the result of Cataloging and is independent of Archiving.
+_Avoid_: Catalog, Archive Review
+
+**Release**:
+A grouping of Disc Records belonging to the same edition or package.
+_Avoid_: Media Item, Disc Record, Season
+
+**Disc Identification**:
+The association of a Disc Record with the content or edition it represents, separate from assigning individual titles through Cataloging. It can identify a Movie or TV Show and may include Season, Release, disc number, and disc role when known.
+_Avoid_: Disc Inspection, Cataloging, DVD Disc Verification, Operator Disc Confirmation
+
+**Cataloging**:
+The mapping of a Disc Record's individual titles to named Movies, Episodes, extras, or other content roles. Cataloging is independent of Archiving and may complete before or after it.
+_Avoid_: Disc Identification, Archive Review, DVD Disc Verification
+
+**Archiving**:
+Preservation of a Detected Disc as an Original Disc Archive, independently of Disc Identification and Cataloging.
+_Avoid_: Cataloging, encoding, Archive Recovery
+
+**Archive Review**:
+Operator review of a saved Original Disc Archive's damage evidence and decisions affecting encoding eligibility. It is separate from mapping the disc's individual titles through Cataloging.
+_Avoid_: Cataloging, Archive Recovery, encode request
+
 **Archive Job**:
 One started attempt to fulfill an Archive Request by preserving its Detected Disc as an Original Disc Archive. Saving that archive completes the Archive Job; subsequent Archive Recovery has a separate lifecycle.
 _Avoid_: Rip job, copy job
